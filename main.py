@@ -89,7 +89,7 @@ class Machine:
         # Positionen: alle auf Y=0 in einer Linie entlang X
         # Übergabepunkt: H-Bot fährt auf (0, 300) — Reichweite beider SCARAx = 500 mm (a2 ≈ ±50°)
         # Magazin hinter SCARA 1 in -Y-Richtung: Reichweite = 350 mm
-        self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-200, 100, 0))
+        self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-400, 100, 0))
         self.cncView     = HBotView(pl=self.sharedPlotter,  position=(   0, 0, 0))
         self.scaraView2  = ScaraView(pl=self.sharedPlotter, position=( 1000, 300, 0))
         self.magazinView = MagazinViewPV(pl=self.sharedPlotter, position=(-400, -350, 0))
