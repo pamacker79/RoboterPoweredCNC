@@ -2,7 +2,8 @@
 Module: View.MagazinViewPV
 Purpose: 3D visualization of the raw-part stack magazine in the shared PyVista scene.
 Responsibilities: Load magazine STL meshes, stack part actors at correct Z positions,
-                  expose update_part_count() and update_schieber() for runtime animation.
+                  expose update_part_count() and update_schieber() for runtime animation,
+                  provide coordinates for robot pickup.
 Inputs:  part_count and schieber hub from Machine control loop.
 Outputs: Updated PyVista actor visibility and positions each frame.
 Dependencies: pyvista, View/Magazin_Modell/*.stl
@@ -84,3 +85,42 @@ class MagazinViewPV:
         """Translate the ejector slide by `hub` mm in -X direction."""
         self._schieber_hub = hub
         self._schieber_actor.position = [-hub, 0.0, 0.0]
+
+    def get_pickup_coordinates(self):
+        """
+        Gibt die (X, Y, Z)-Weltkoordinaten des aktuell obersten Bauteils zurück.
+        Wenn das Magazin leer ist, wird None zurückgegeben.
+        """
+        if self._part_count == 0:
+            return None
+        
+        # Der Index des obersten sichtbaren Bauteils
+        top_index = self._part_count - 1
+        
+        # Den Aktor des obersten Bauteils holen
+        top_actor = self._part_actors[top_index]
+        
+        # Die Bounds [xmin, xmax, ymin, ymax, zmin, zmax] des Bauteils abfragen
+        b = top_actor.bounds
+        
+        # Mitte des Bauteils auf X und Y berechnen
+        cx = (b[0] + b[1]) / 2.0
+        cy = (b[2] + b[3]) / 2.0
+        
+        # Z-Koordinate (Absolute Oberkante des Bauteils in der 3D-Welt)
+        top_z = b[5]
+        
+        return (cx, cy, top_z)
+
+    def pick_top_part(self):
+        """
+        Simuliert die Entnahme des obersten Bauteils durch den Roboter.
+        Blendet das Teil aus und reduziert den Füllstand um 1.
+        Gibt True zurück, wenn erfolgreich entnommen, False wenn das Magazin leer ist.
+        """
+        if self._part_count > 0:
+            self._part_count -= 1
+            # Sichtbarkeit aktualisieren (das oberste verschwindet)
+            self.update_part_count(self._part_count)
+            return True
+        return False
