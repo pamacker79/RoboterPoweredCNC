@@ -8,9 +8,17 @@ Outputs: 3D PyVista scene updates; HMI state display updates.
 Dependencies: Model.*, View.*, ViewModel.*, tkinter, pyvista
 """
 import os
-os.environ["TCL_LIBRARY"] = r"C:\Users\Tiago\AppData\Local\Programs\Python\Python313\tcl\tcl8.6"
-os.environ["TK_LIBRARY"]  = r"C:\Users\Tiago\AppData\Local\Programs\Python\Python313\tcl\tk8.6"
 import sys
+
+python_base = sys.base_prefix
+tcl_path = os.path.join(python_base, "tcl", "tcl8.6")
+tk_path = os.path.join(python_base, "tcl", "tk8.6")
+
+if os.path.exists(tcl_path):
+    os.environ["TCL_LIBRARY"] = tcl_path
+if os.path.exists(tk_path):
+    os.environ["TK_LIBRARY"] = tk_path
+
 sys.path.append('./Model')
 sys.path.append('./ViewModel')
 sys.path.append('./View')
