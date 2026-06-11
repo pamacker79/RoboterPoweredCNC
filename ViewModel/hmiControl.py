@@ -1,3 +1,11 @@
+"""
+Module: hmiControl
+Purpose: Data transfer object for incoming HMI commands (button/switch states from operator).
+Responsibilities: Holds jog, Start/Stop/Reset, mode, and override values; written by Hmi, read by RobotController.
+Inputs:  Button/slider events from Hmi widget handlers.
+Outputs: Control flags consumed by RobotController.update_hmi().
+Dependencies: none
+"""
 import sys
 sys.path.append('../ViewModel')
 
@@ -24,7 +32,9 @@ class hmiControl:
 
         self.Start = False
         self.Stop = False
+        self.Reset = False
 
-        self.OperationMode = 0 # 0=Manual / 1=Automatic
-        self.CoordSystem = "wählen" # Hilfsvariable für das Koordinatensystem
+        self.OperationMode = 0  # 0=Manual / 1=Automatic
+        self.CoordSystem = "wählen"
+        self.OverridePercent = 100  # 0–100 %, speed override for CNC execution
 

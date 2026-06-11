@@ -1,20 +1,29 @@
+"""
+Module: hBot
+Purpose: Kinematic model for the CoreXY / H-Bot gantry robot.
+Responsibilities: XY↔Motor-A/B coordinate conversion, axis limit enforcement, move commands.
+Inputs:  Cartesian X/Y targets via mcsAxisX/Y; motor positions via acsAxis_a/b.
+Outputs: Updated axis positions; motor coordinates from inverse(), Cartesian from forward().
+Dependencies: Model.Axis, Model.CncInterpreter, Model.RobotConfig
+"""
 import sys
 sys.path.append('../Model')
 
 from Model.Axis import Axis
 from Model.CncInterpreter import CncInterpreter
+from Model.RobotConfig import HBOT_LIMITS
 
 class hBot:
 
     def __init__(self):
 
         # Motor axes
-        self.acsAxis_a = Axis()
-        self.acsAxis_b = Axis()
+        self.acsAxis_a = Axis(*HBOT_LIMITS["acsAxis_a"])
+        self.acsAxis_b = Axis(*HBOT_LIMITS["acsAxis_b"])
 
         # Cartesian coordinates
-        self.mcsAxisX = Axis()
-        self.mcsAxisY = Axis()
+        self.mcsAxisX = Axis(*HBOT_LIMITS["mcsAxisX"])
+        self.mcsAxisY = Axis(*HBOT_LIMITS["mcsAxisY"])
 
         self.CncInter = CncInterpreter()
     # --------------------------------
@@ -56,8 +65,10 @@ class hBot:
         self.acsAxis_b.ActualPosition = motor_b
 
         # Update Cartesian coordinates
-        self.mcsAxisX = mcsAxisX
-        self.mcsAxisY = mcsAxisY
+        self.mcsAxisX.Sollposition = mcsAxisX
+        self.mcsAxisX.ActualPosition = mcsAxisX
+        self.mcsAxisY.Sollposition = mcsAxisY
+        self.mcsAxisY.ActualPosition = mcsAxisY
 
     # --------------------------------
     # Get actual XY position
@@ -84,33 +95,3 @@ class hBot:
         print(f"Calculated X: {mcsAxisX}")
         print(f"Calculated Y: {mcsAxisY}")
 
-if __name__ == "__main__":
-    print("=== CoreXY G-Code Ausführung ===")
-    
-    # 1. CNC Datei einlesen und interpretieren
-    cnc = CncInterpreter()
-    datei_pfad = Path(__file__).parent / "programm.nc"
-    robot_path = cnc.export_robot_path()
-        
-    # 2. Roboter initialisieren
-    bot = hBot()
-
-    
-    # 3. Den extrahierten Pfad an den Roboter übergeben
-    for point in robot_path:
-        # CoreXY nutzt vorerst nur X und Y
-        bot.move_to(point['x'], point['y'])
-        bot.status()
-
-    # --------------------------------
-    # TEST
-    # --------------------------------
-
-    bot = hBot()
-
-    target_x = int(input("Enter X: "))
-    target_y = int(input("Enter Y: "))
-
-    bot.move_to(target_x, target_y)
-
-    bot.status()

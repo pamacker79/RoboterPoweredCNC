@@ -6,3 +6,5 @@ Model\__pycache__\*
 View\__pycache__\*
 ViewModel\__pycache__\*
 *.pyc
+venv
+CLAUDE.md

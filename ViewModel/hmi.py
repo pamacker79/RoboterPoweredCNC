@@ -1,3 +1,12 @@
+"""
+Module: hmi (Hmi)
+Purpose: Tkinter HMI panel for one robot — jog controls, mode selection, status display.
+Responsibilities: Render all operator controls, translate widget events into hmiControl flags,
+                  display axis positions from hmiState, show fault/status feedback.
+Inputs:  Button/slider events from operator; hmiState from RobotController via setHmiState().
+Outputs: hmiControl flags read by RobotController; status label shown to operator.
+Dependencies: tkinter, ViewModel.hmiControl, ViewModel.hmiState
+"""
 
 import sys
 sys.path.append('../ViewModel')
@@ -6,60 +15,67 @@ import tkinter as tk
 from tkinter import ttk
 from hmiControl import hmiControl
 from hmiState import hmiState
-from tkinter import ttk, messagebox
+
 
 class Hmi:
     def __init__(self, parent, nameofHmi):
         self.root = tk.Frame(
-    parent,
-    bg="lightblue",
-    width=400,
-    height=400,
-    relief="ridge",
-    borderwidth=2
-)
+            parent,
+            bg="lightblue",
+            width=400,
+            height=370,
+            relief="ridge",
+            borderwidth=2
+        )
 
         self.root.pack(side="left", padx=5)
         self.root.pack_propagate(False)
 
-        # Instanz der Steuerung
         self.hmiControl = hmiControl()
         self.hmiState = hmiState()
-        self.step = 1
 
-        # Layout
         links = 10
         rechts = 250
-        unten = 350
-
 
         # ---------------- EVENTS ----------------
 
         def on_coord_changed(event):
-            selected = combo_axis.get()
+            selected = self._combo_axis.get()
             self.hmiControl.CoordSystem = selected
-            print(f"Koordinatensystem geändert auf: {selected}")
+            if selected == "Joint":
+                self.LabelPos1.config(text="J1:")
+                self.LabelPos2.config(text="J2:")
+                self.LabelPos3.config(text="Z :")
+                self.LabelPos4.config(text="J4:")
+            else:
+                self.LabelPos1.config(text="X :")
+                self.LabelPos2.config(text="Y :")
+                self.LabelPos3.config(text="Z :")
+                self.LabelPos4.config(text="R :")
+            self._update_mode_display()
 
         def on_mode_changed(event):
-            selected = combo_mode.get()
-
-            if selected == "Hand":
-                self.hmiControl.OperationMode = 0
-            elif selected == "Automatisch":
-                self.hmiControl.OperationMode = 1
-
-            print(f"Betriebsmodus geändert auf: {selected}")
+            selected = self._combo_mode.get()
+            self.hmiControl.OperationMode = 0 if selected == "Hand" else 1
+            self._update_mode_display()
 
         def on_start_click():
             self.hmiControl.Start = True
             self.hmiControl.Stop = False
-            print("Start")
 
         def on_stop_click():
             self.hmiControl.Start = False
             self.hmiControl.Stop = True
-            print("Stop")
 
+        def on_reset_click():
+            self.hmiControl.Reset = True
+            self.hmiControl.Start = False
+
+        def on_override_changed(val):
+            pct = int(float(val))
+            self.hmiControl.OverridePercent = pct
+            self._override_value_label.config(text=f"{pct}%")
+            self._update_mode_display()
 
         # ---------------- UI ----------------
 
@@ -71,200 +87,210 @@ class Hmi:
         )
         titel.pack(pady=5)
 
-        button_start = tk.Button(
-            self.root,
-            text="Start",
-            width=15,
-            command=on_start_click
-        )
-        button_start.place(x=links, y=unten)
-
-        button_stop = tk.Button(
-            self.root,
-            text="Stop",
-            width=15,
-            command=on_stop_click
-        )
-        button_stop.place(x=rechts, y=unten)
-
         # Koordinatensystem
-        combo_axis = ttk.Combobox(
+        self._combo_axis = ttk.Combobox(
             self.root,
             values=["Welt", "Joint", "Werkzeug"],
             state="readonly"
         )
-        combo_axis.set("wählen")
-        combo_axis.bind("<<ComboboxSelected>>", on_coord_changed)
-        combo_axis.place(x=links, y=40)
+        self._combo_axis.set("wählen")
+        self._combo_axis.bind("<<ComboboxSelected>>", on_coord_changed)
+        self._combo_axis.place(x=links, y=40)
 
         # Betriebsart
-        combo_mode = ttk.Combobox(
+        self._combo_mode = ttk.Combobox(
             self.root,
             values=["Hand", "Automatisch"],
             state="readonly"
         )
-        combo_mode.set("wählen")
-        combo_mode.bind("<<ComboboxSelected>>", on_mode_changed)
-        combo_mode.place(x=rechts, y=40)
+        self._combo_mode.set("wählen")
+        self._combo_mode.bind("<<ComboboxSelected>>", on_mode_changed)
+        self._combo_mode.place(x=rechts, y=40)
 
-        # Beschriftungen
-        self.LabelPos1 = tk.Label(self.root, text="X :", bg="lightblue")
-        self.LabelPos1.place(x=10, y=100)
+        # Aktiv-Modus-Anzeige (Betriebsart | Koordinatensystem | Override)
+        self.mode_label = tk.Label(
+            self.root,
+            text="",
+            bg="lightsalmon",
+            relief="sunken",
+            font=("Arial", 8),
+            anchor="center"
+        )
+        self.mode_label.place(x=links, y=68, width=380, height=20)
 
-        self.LabelPos2 = tk.Label(self.root, text="Y :", bg="lightblue")
-        self.LabelPos2.place(x=10, y=130)
+        # Achszeilen X / Y / Z / R
+        self.LabelPos1, self.ButtonXPlus, self.ButtonXNeg, self.x_label = \
+            self._create_axis_row("X :", 100, self.x_plus, self.x_minus)
+        self.LabelPos2, self.ButtonYPlus, self.ButtonYNeg, self.y_label = \
+            self._create_axis_row("Y :", 130, self.y_plus, self.y_minus)
+        self.LabelPos3, self.ButtonZPlus, self.ButtonZNeg, self.z_label = \
+            self._create_axis_row("Z :", 160, self.z_plus, self.z_minus)
+        self.LabelPos4, self.ButtonRPlus, self.ButtonRNeg, self.r_label = \
+            self._create_axis_row("R :", 190, self.r_plus, self.r_minus)
 
-        self.LabelPos3 = tk.Label(self.root, text="Z :", bg="lightblue")
-        self.LabelPos3.place(x=10, y=160)
+        # Override-Schieberegler
+        override_label = tk.Label(self.root, text="Override:", bg="lightblue")
+        override_label.place(x=links, y=228)
 
-        self.LabelPos4 = tk.Label(self.root, text="R :", bg="lightblue")
-        self.LabelPos4.place(x=10, y=190)
+        self._override_value_label = tk.Label(self.root, text="100%", bg="lightblue", width=5)
+        self._override_value_label.place(x=345, y=228)
 
-        # X
-        self.x_label = tk.Label(self.root, text="0", bg="lightblue")
-        self.x_label.place(x=200, y=100)
+        override_slider = ttk.Scale(
+            self.root,
+            from_=0, to=100,
+            orient="horizontal",
+            length=240,
+            command=on_override_changed
+        )
+        override_slider.set(100)
+        override_slider.place(x=90, y=228)
 
-        self.ButtonXPlus = tk.Button(self.root, text="+", width=3)
-        self.ButtonXPlus.place(x=80, y=95)
-        self.ButtonXPlus.bind("<Button-1>", lambda event: self.x_plus(True))
-        self.ButtonXPlus.bind("<ButtonRelease-1>", lambda event: self.x_plus(False))
+        # Statusanzeige
+        self.status_label = tk.Label(
+            self.root,
+            text="Bereit",
+            bg="lightgreen",
+            relief="sunken",
+            font=("Arial", 10, "bold"),
+            anchor="center"
+        )
+        self.status_label.place(x=links, y=262, width=380, height=28)
 
-        self.ButtonXNeg = tk.Button(self.root, text="-", width=3)
-        self.ButtonXNeg.place(x=120, y=95)
-        self.ButtonXNeg.bind("<Button-1>", lambda event: self.x_minus(True))
-        self.ButtonXNeg.bind("<ButtonRelease-1>", lambda event: self.x_minus(False))
+        # Schaltflächen Start / Reset / Stop
+        button_start = tk.Button(
+            self.root, text="Start", width=10, command=on_start_click
+        )
+        button_start.place(x=10, y=305)
 
-        # Y
-        self.y_label = tk.Label(self.root, text="0", bg="lightblue")
-        self.y_label.place(x=200, y=130)
+        button_reset = tk.Button(
+            self.root, text="Reset", width=10, command=on_reset_click
+        )
+        button_reset.place(x=140, y=305)
 
-        self.ButtonYPlus = tk.Button(self.root, text="+", width=3)
-        self.ButtonYPlus.place(x=80, y=125)
-        self.ButtonYPlus.bind("<Button-1>", lambda event: self.y_plus(True))
-        self.ButtonYPlus.bind("<ButtonRelease-1>", lambda event: self.y_plus(False))
+        button_stop = tk.Button(
+            self.root, text="Stop", width=10, command=on_stop_click
+        )
+        button_stop.place(x=270, y=305)
 
-        self.ButtonYNeg = tk.Button(self.root, text="-", width=3)
-        self.ButtonYNeg.place(x=120, y=125)
-        self.ButtonYNeg.bind("<Button-1>", lambda event: self.y_minus(True))
-        self.ButtonYNeg.bind("<ButtonRelease-1>", lambda event: self.y_minus(False))
+        # Initialzustand der Modus-Anzeige setzen
+        self._update_mode_display()
 
-        # Z
-        self.z_label = tk.Label(self.root, text="0", bg="lightblue")
-        self.z_label.place(x=200, y=160)
+    # ============================================================
+    # MODUS-ANZEIGE
+    # ============================================================
+    def _update_mode_display(self):
+        """Aktualisiert die Modus-Anzeigeleiste (Betriebsart | Koordinaten | Override)."""
+        betrieb = self._combo_mode.get()
+        koord   = self._combo_axis.get()
+        ov      = self.hmiControl.OverridePercent
 
-        self.ButtonZPlus = tk.Button(self.root, text="+", width=3)
-        self.ButtonZPlus.place(x=80, y=155)
-        self.ButtonZPlus.bind("<Button-1>", lambda event: self.z_plus(True))
-        self.ButtonZPlus.bind("<ButtonRelease-1>", lambda event: self.z_plus(False))
+        betrieb_text = betrieb if betrieb != "wählen" else "—"
+        koord_text   = koord   if koord   != "wählen" else "—"
 
-        self.ButtonZNeg = tk.Button(self.root, text="-", width=3)
-        self.ButtonZNeg.place(x=120, y=155)
-        self.ButtonZNeg.bind("<Button-1>", lambda event: self.z_minus(True))
-        self.ButtonZNeg.bind("<ButtonRelease-1>", lambda event: self.z_minus(False))
+        unvollstaendig = betrieb == "wählen" or koord == "wählen"
 
-        # R
-        self.r_label = tk.Label(self.root, text="0", bg="lightblue")
-        self.r_label.place(x=200, y=190)
+        if unvollstaendig:
+            bg = "lightsalmon"
+        elif betrieb == "Automatisch":
+            bg = "lightyellow"
+        else:
+            bg = "lightcyan"
 
-        self.ButtonRPlus = tk.Button(self.root, text="+", width=3)
-        self.ButtonRPlus.place(x=80, y=185)
-        self.ButtonRPlus.bind("<Button-1>", lambda event: self.r_plus(True))
-        self.ButtonRPlus.bind("<ButtonRelease-1>", lambda event: self.r_plus(False))
+        self.mode_label.config(
+            text=f"{betrieb_text}  |  {koord_text}  |  Ov: {ov} %",
+            bg=bg
+        )
 
-        self.ButtonRNeg = tk.Button(self.root, text="-", width=3)
-        self.ButtonRNeg.place(x=120, y=185)
-        self.ButtonRNeg.bind("<Button-1>", lambda event: self.r_minus(True))
-        self.ButtonRNeg.bind("<ButtonRelease-1>", lambda event: self.r_minus(False))
+    # ============================================================
+    # AXIS ROW HELPER
+    # ============================================================
+    def _create_axis_row(self, label_text, y_pos, plus_handler, minus_handler):
+        name_label = tk.Label(self.root, text=label_text, bg="lightblue")
+        name_label.place(x=10, y=y_pos)
 
+        value_label = tk.Label(self.root, text="0", bg="lightblue")
+        value_label.place(x=200, y=y_pos)
+
+        btn_plus = tk.Button(self.root, text="+", width=3)
+        btn_plus.place(x=80, y=y_pos - 5)
+        btn_plus.bind("<Button-1>", lambda event: plus_handler(True))
+        btn_plus.bind("<ButtonRelease-1>", lambda event: plus_handler(False))
+
+        btn_neg = tk.Button(self.root, text="-", width=3)
+        btn_neg.place(x=120, y=y_pos - 5)
+        btn_neg.bind("<Button-1>", lambda event: minus_handler(True))
+        btn_neg.bind("<ButtonRelease-1>", lambda event: minus_handler(False))
+
+        return name_label, btn_plus, btn_neg, value_label
+
+    # ============================================================
+    # JOG HANDLERS
+    # ============================================================
     def is_hand_mode(self):
         return self.hmiControl.OperationMode == 0
-    
-    def x_plus(self,value):
+
+    def x_plus(self, value):
         self.hmiControl.MoveXPlus = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisXPosition += 1
-            self.x_label["text"] = self.hmiState.axisXPosition   
-        print("xplus")
 
-    def x_minus(self,value):
+    def x_minus(self, value):
         self.hmiControl.MoveXNeg = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisXPosition -= 1
-            self.x_label["text"] = self.hmiState.axisXPosition
-        print("xminus")
 
-    def y_plus(self,value):
+    def y_plus(self, value):
         self.hmiControl.MoveYPlus = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisYPosition += 1
-            self.y_label["text"] = self.hmiState.axisYPosition
-        print("yplus")        
 
-    def y_minus(self,value):    
+    def y_minus(self, value):
         self.hmiControl.MoveYNeg = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisYPosition -= 1
-            self.y_label["text"] = self.hmiState.axisYPosition
-        print("yminus")
 
-    def z_plus(self,value):
-
+    def z_plus(self, value):
         self.hmiControl.MoveZPlus = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisZPosition += 1
-            self.z_label["text"] = self.hmiState.axisZPosition
-        print("zplus")    
 
-    def z_minus(self,value):
+    def z_minus(self, value):
         self.hmiControl.MoveZNeg = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisZPosition -= 1
-            self.z_label["text"] = self.hmiState.axisZPosition
-        print("zminus")    
 
-    def r_plus(self,value):
+    def r_plus(self, value):
         self.hmiControl.MoveRPlus = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisRPosition += 1
-            self.r_label["text"] = self.hmiState.axisRPosition
-        print("rplus")    
 
-    def r_minus(self,value):
+    def r_minus(self, value):
         self.hmiControl.MoveRNeg = value
-        if value and self.is_hand_mode():
-            self.hmiState.axisRPosition -= 1
-            self.r_label["text"] = self.hmiState.axisRPosition
-        print("rminus")    
 
+    # ============================================================
+    # STATE IN / OUT
+    # ============================================================
     def getHmiControl(self):
         return self.hmiControl
-    
-    def setHmiState(self,hmiState):
+
+    def setHmiState(self, hmiState):
         self.hmiState = hmiState
-        self.x_label["text"] = self.hmiState.axisXPosition
-        self.y_label["text"] = self.hmiState.axisYPosition
-        self.z_label["text"] = self.hmiState.axisZPosition
-        self.r_label["text"]= self.hmiState.axisRPosition
+        if self.hmiControl.CoordSystem == "Joint":
+            self.x_label["text"] = round(self.hmiState.axisJ1Position, 1)
+            self.y_label["text"] = round(self.hmiState.axisJ2Position, 1)
+            self.z_label["text"] = round(self.hmiState.axisJ3Position, 1)
+            self.r_label["text"] = round(self.hmiState.axisJ4Position, 1)
+        else:
+            self.x_label["text"] = round(self.hmiState.axisXPosition, 1)
+            self.y_label["text"] = round(self.hmiState.axisYPosition, 1)
+            self.z_label["text"] = round(self.hmiState.axisZPosition, 1)
+            self.r_label["text"] = round(self.hmiState.axisRPosition, 1)
+
+    def setStatus(self, text, color="lightgreen"):
+        """Update the status label shown to the operator."""
+        self.status_label.config(text=text, bg=color)
+
 
 if __name__ == "__main__":
-
     root = tk.Tk()
-    root.title("3 Roboter")
-    root.geometry("1200x450")
+    root.title("HMI Test")
+    root.geometry("1250x415")
 
     frame1 = tk.Frame(root)
     frame1.pack(side="left", padx=5)
-
     frame2 = tk.Frame(root)
     frame2.pack(side="left", padx=5)
-
     frame3 = tk.Frame(root)
     frame3.pack(side="left", padx=5)
 
-    hmi1 = Hmi(frame1, "Roboter Scara")
-    hmi2 = Hmi(frame2, "Roboter Hbot")
-    hmi3 = Hmi(frame3, "Roboter 3")
-
-
+    hmi1 = Hmi(frame1, "Roboter Scara 1")
+    hmi2 = Hmi(frame2, "Roboter H-Bot")
+    hmi3 = Hmi(frame3, "Roboter Scara 2")
 
     root.mainloop()

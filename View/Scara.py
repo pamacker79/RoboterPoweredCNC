@@ -6,8 +6,8 @@ zu laden, grafisch darzustellen und durch Vorwärtskinematik zu animieren.
 
 Neu:
 - position=(x, y, z), damit mehrere Roboter im gleichen Fenster stehen können
-- sichtbarer Greifer am Ende der Spindel
-- Greifer fährt und rotiert mit der Spindel mit
+- Vakuumsauger (Saugnapf) anstelle eines Parallelgreifers
+- Sauger fährt und rotiert mit der Spindel mit
 """
 
 import sys
@@ -68,7 +68,7 @@ class Scara:
         outer_arm_mesh.translate(self.position, inplace=True)
         spindle_mesh.translate(self.position, inplace=True)
 
-        # Spindel-Mesh speichern, damit der Greifer am unteren Ende gebaut werden kann
+        # Spindel-Mesh speichern, damit der Sauger am unteren Ende gebaut werden kann
         self.spindle_mesh = spindle_mesh
 
         # --------------------------------------------------------
@@ -121,10 +121,9 @@ class Scara:
         self.spindle_actor.origin = self.origin_spindle
 
         # --------------------------------------------------------
-        # 9. Greifer hinzufügen
+        # 9. Sauger hinzufügen
         # --------------------------------------------------------
-        self.gripper_half_width = 20.0
-        self._add_gripper()
+        self._add_suction_cup()
 
         # Initiale Transformation setzen, aber noch NICHT rendern
         self.update_joints(0, 0, 0, render=False)
@@ -139,23 +138,12 @@ class Scara:
         ]
 
     # ============================================================
-    # GREIFER
+    # VAKUUM-SAUGER
     # ============================================================
-    def _add_gripper(self):
+    def _add_suction_cup(self):
         """
-        Erstellt einen einfachen Parallelgreifer am unteren Ende der Spindel.
-
-        Der Greifer besteht aus:
-        - Halterung
-        - linker Finger
-        - rechter Finger
-
-        Wichtig:
-        Die Finger werden zuerst mittig erstellt.
-        Der Abstand links/rechts wird später in update_joints über eine zusätzliche
-        lokale Verschiebung gemacht.
+        Erstellt einen Vakuumsauger am unteren Ende der Spindel.
         """
-
         b = self.spindle_mesh.bounds
 
         # Mitte der Spindel
@@ -165,98 +153,62 @@ class Scara:
         # Unterstes Ende der Spindel
         tip_z = b[4]
 
-        # Feinabgleich, falls Greifer nicht genau sitzt
-        self.gripper_offset = (0.0, 0.0, 0.0)
-        ox, oy, oz = self.gripper_offset
+        tx = cx
+        ty = cy
+        tz = tip_z
 
-        tx = cx + ox
-        ty = cy + oy
-        tz = tip_z + oz
-
-        # Greifer-Masse
-        finger_len = 60.0
-
-        # Halterung
-        mount = pv.Cube(
-            center=(tx, ty, tz + 10),
-            x_length=40,
-            y_length=70,
-            z_length=20
+        # Halterung (kleiner Zylinder, der aus der Spindel kommt)
+        mount = pv.Cylinder(
+            center=(tx, ty, tz - 10),
+            direction=(0, 0, 1),
+            radius=6,
+            height=20
         )
 
-        # Finger-Grundkörper
-        finger = pv.Cube(
-            center=(tx, ty, tz - finger_len / 2.0),
-            x_length=14,
-            y_length=14,
-            z_length=finger_len
+        # Saugnapf (Kegel / Cone)
+        cup = pv.Cone(
+            center=(tx, ty, tz - 22.5),
+            direction=(0, 0, -1),
+            height=5,
+            radius=15
         )
 
         # Actors hinzufügen
-        self.gripper_mount_actor = self.pl.add_mesh(
+        self.suction_mount_actor = self.pl.add_mesh(
             mount,
             color="dimgray"
         )
 
-        self.gripper_finger_l_actor = self.pl.add_mesh(
-            finger.copy(),
+        self.suction_cup_actor = self.pl.add_mesh(
+            cup,
             color="red"
         )
 
-        self.gripper_finger_r_actor = self.pl.add_mesh(
-            finger.copy(),
-            color="red"
-        )
+        # Workpiece actor — hidden until suction is active
+        # Das Dummy-Rohteil wird direkt unter den Sauger platziert
+        part_mesh = pv.Box(bounds=(
+            tx - 40, tx + 40,
+            ty - 30, ty + 30,
+            tz - 45, tz - 25,
+        ))
+        self._part_actor = self.pl.add_mesh(part_mesh, color="saddlebrown")
+        self._part_actor.SetVisibility(False)
+
+    def attach_part(self, visible: bool):
+        """Zeigt oder versteckt das simulierte Bauteil am Sauger."""
+        self._part_actor.SetVisibility(visible)
 
     def set_gripper(self, closed=False):
         """
-        Greifer öffnen oder schliessen.
+        Schaltet das Vakuum ein oder aus (Name 'set_gripper' für Kompatibilität mit HMI).
 
-        closed=False -> Greifer offen
-        closed=True  -> Greifer geschlossen
+        closed=False -> Vakuum aus (Rot)
+        closed=True  -> Vakuum an (Grün)
         """
-
         if closed:
-            self.gripper_half_width = 7.0
+            self.suction_cup_actor.GetProperty().SetColor(pv.Color("limegreen").float_rgb)
         else:
-            self.gripper_half_width = 20.0
-
-    # ============================================================
-    # TRANSFORMATIONEN
-    # ============================================================
-    def _create_rotation(self, origin, angle):
-        """
-        Erstellt eine Rotation um die Z-Achse um einen bestimmten Drehpunkt.
-        """
-
-        transform = vtk.vtkTransform()
-        transform.PostMultiply()
-
-        transform.Translate(-origin[0], -origin[1], -origin[2])
-        transform.RotateZ(angle)
-        transform.Translate(origin[0], origin[1], origin[2])
-
-        return transform
-
-    def _create_gripper_finger_transform(self, t_spindle, y_offset):
-        """
-        Erstellt eine Transformation für einen Greiferfinger.
-
-        Zuerst wird der Finger lokal seitlich verschoben.
-        Danach bekommt er die komplette Spindel-Transformation.
-        Dadurch fährt und rotiert der Finger mit der Spindel mit.
-        """
-
-        t_finger = vtk.vtkTransform()
-        t_finger.PostMultiply()
-
-        # Lokale Öffnungsbewegung des Greifers
-        t_finger.Translate(0.0, y_offset, 0.0)
-
-        # Danach Spindelbewegung übernehmen
-        t_finger.Concatenate(t_spindle)
-
-        return t_finger
+            self.suction_cup_actor.GetProperty().SetColor(pv.Color("red").float_rgb)
 
     # ============================================================
     # ANZEIGE
@@ -265,76 +217,59 @@ class Scara:
         """
         Öffnet das 3D-Fenster.
         """
-
         self.pl.show(interactive_update=True, auto_close=False)
 
-    def update_joints(self, inner_angle=0, outer_angle=0, spindle_angle=0, render=True):
+    def update_joints(self, inner_angle=0, outer_angle=0, spindle_angle=0, z_height=0.0, render=True):
         """
         Aktualisiert die Gelenkwinkel.
-
-        Der äussere Arm folgt dem inneren Arm.
-        Die Spindel folgt dem äusseren Arm.
-        Der Greifer folgt der Spindel.
         """
+        ix, iy, iz = self.origin_inner
+        ox, oy, oz = self.origin_outer
+        sx, sy, sz = self.origin_spindle
+
+        # Joint1Frame: innerer Arm dreht um Gelenk 1
+        t_j1 = vtk.vtkTransform()
+        t_j1.PostMultiply()
+        t_j1.Translate(-ix, -iy, -iz)
+        t_j1.RotateZ(inner_angle)
+        t_j1.Translate(ix, iy, iz)
+        self.inner_arm_actor.SetUserTransform(t_j1)
+
+        # Joint2Frame: äußerer Arm dreht lokal um Gelenk 2, folgt Gelenk 1
+        t_j2 = vtk.vtkTransform()
+        t_j2.PostMultiply()
+        t_j2.Translate(-ox, -oy, -oz)
+        t_j2.RotateZ(outer_angle)
+        t_j2.Translate(ox, oy, oz)
+        t_j2.Translate(-ix, -iy, -iz)
+        t_j2.RotateZ(inner_angle)
+        t_j2.Translate(ix, iy, iz)
+        self.outer_arm_actor.SetUserTransform(t_j2)
+
+        # ToolFrame (TCP): Spindel dreht lokal, folgt J2 und J1, Z-Bewegung zuletzt
+        t_tcp = vtk.vtkTransform()
+        t_tcp.PostMultiply()
+        t_tcp.Translate(-sx, -sy, -sz)
+        t_tcp.RotateZ(spindle_angle)
+        t_tcp.Translate(sx, sy, sz)
+        t_tcp.Translate(-ox, -oy, -oz)
+        t_tcp.RotateZ(outer_angle)
+        t_tcp.Translate(ox, oy, oz)
+        t_tcp.Translate(-ix, -iy, -iz)
+        t_tcp.RotateZ(inner_angle)
+        t_tcp.Translate(ix, iy, iz)
+        t_tcp.Translate(0.0, 0.0, z_height)
+        self.spindle_actor.SetUserTransform(t_tcp)
 
         # --------------------------------------------------------
-        # 1. Innerer Arm
+        # Sauger folgt TCP-Frame
         # --------------------------------------------------------
-        t_inner = self._create_rotation(
-            self.origin_inner,
-            inner_angle
-        )
-
-        self.inner_arm_actor.SetUserTransform(t_inner)
+        self.suction_mount_actor.SetUserTransform(t_tcp)
+        self.suction_cup_actor.SetUserTransform(t_tcp)
+        self._part_actor.SetUserTransform(t_tcp)
 
         # --------------------------------------------------------
-        # 2. Äusserer Arm folgt innerem Arm
-        # --------------------------------------------------------
-        t_outer = vtk.vtkTransform()
-        t_outer.PostMultiply()
-
-        t_outer.Concatenate(
-            self._create_rotation(self.origin_outer, outer_angle)
-        )
-
-        t_outer.Concatenate(t_inner)
-
-        self.outer_arm_actor.SetUserTransform(t_outer)
-
-        # --------------------------------------------------------
-        # 3. Spindel folgt äusserem Arm
-        # --------------------------------------------------------
-        t_spindle = vtk.vtkTransform()
-        t_spindle.PostMultiply()
-
-        t_spindle.Concatenate(
-            self._create_rotation(self.origin_spindle, spindle_angle)
-        )
-
-        t_spindle.Concatenate(t_outer)
-
-        self.spindle_actor.SetUserTransform(t_spindle)
-
-        # --------------------------------------------------------
-        # 4. Greifer folgt Spindel
-        # --------------------------------------------------------
-        self.gripper_mount_actor.SetUserTransform(t_spindle)
-
-        t_finger_l = self._create_gripper_finger_transform(
-            t_spindle,
-            -self.gripper_half_width
-        )
-
-        t_finger_r = self._create_gripper_finger_transform(
-            t_spindle,
-            self.gripper_half_width
-        )
-
-        self.gripper_finger_l_actor.SetUserTransform(t_finger_l)
-        self.gripper_finger_r_actor.SetUserTransform(t_finger_r)
-
-        # --------------------------------------------------------
-        # 5. Fenster aktualisieren
+        # Fenster aktualisieren
         # --------------------------------------------------------
         if render:
             try:
@@ -346,7 +281,6 @@ class Scara:
         """
         Schliesst das PyVista-Fenster.
         """
-
         self.pl.close()
 
 
@@ -392,13 +326,17 @@ if __name__ == "__main__":
             spindle_angle=i * 2
         )
 
-        # Test: Greifer abwechselnd öffnen/schliessen
+        # Test: Vakuum abwechselnd ein-/ausschalten
         if i % 100 < 50:
             robot1.set_gripper(closed=False)
             robot2.set_gripper(closed=True)
+            robot1.attach_part(False)
+            robot2.attach_part(True)
         else:
             robot1.set_gripper(closed=True)
             robot2.set_gripper(closed=False)
+            robot1.attach_part(True)
+            robot2.attach_part(False)
 
         time.sleep(0.05)
 

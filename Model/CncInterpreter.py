@@ -1,3 +1,12 @@
+"""
+Module: CncInterpreter
+Purpose: G-Code parser and path interpolator for CNC program execution.
+Responsibilities: Parse G0/G1/G2/G3, G90/G91, F, X/Y/Z/I/J/K; interpolate moves into
+                  small waypoints; export robot-ready motion command dicts.
+Inputs:  G-Code file path or string via load_from_path() / load_from_string().
+Outputs: List of waypoint dicts {X, Y, Z} from interpolate_path(step_size).
+Dependencies: pathlib, re
+"""
 from pathlib import Path
 import re
 

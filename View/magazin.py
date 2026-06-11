@@ -1,15 +1,10 @@
 """
-View-Modell: Stapelmagazin mit Rohteilen und Schieber
-======================================================
+View: Stapelmagazin mit Rohteilen und Schieber
+===============================================
 Lädt drei STL-Dateien:
   - Magazin_V2.stl       (Magazinschacht)
   - Roh_Teil.stl          (Rohteil, wird gestapelt)
   - Magazin_Schieber.stl  (Schieber zur Vereinzelung)
-
-Das Skript misst die Geometrie beim Laden automatisch aus,
-zentriert die Rohteile im Magazin und berechnet die maximale
-Stapelkapazität selbst. Alle Werte lassen sich in der
-Konfiguration übersteuern.
 
 Benötigte Pakete:  pip install numpy matplotlib
 """
@@ -22,49 +17,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-# ----------------------------------------------------------
-# 1) KONFIGURATION
-# ----------------------------------------------------------
-SKRIPT_ORDNER = Path(__file__).parent
-
-# --- Variante A: direkt aus dem GitHub-Repo laden ---
-BASIS_URL = ("https://raw.githubusercontent.com/pamacker79/"
-             "RoboterPoweredCNC/main/View/Magazin_Modell/")
-MAGAZIN_QUELLE  = BASIS_URL + "Magazin_V2.stl"
-ROHTEIL_QUELLE  = BASIS_URL + "Roh_Teil.stl"
-SCHIEBER_QUELLE = BASIS_URL + "Magazin_Schieber.stl"
-
-# --- Variante B: lokale Dateien (schneller, geht offline) ---
-# Auskommentieren der Zeilen oben und diese aktivieren.
-# Das Skript liegt in ViewModel, die STLs in View/Magazin_Modell:
-# MODELL_ORDNER   = SKRIPT_ORDNER.parent / "View" / "Magazin_Modell"
-# MAGAZIN_QUELLE  = str(MODELL_ORDNER / "Magazin_V2.stl")
-# ROHTEIL_QUELLE  = str(MODELL_ORDNER / "Roh_Teil.stl")
-# SCHIEBER_QUELLE = str(MODELL_ORDNER / "Magazin_Schieber.stl")
-
-# Befüllung (Werte aus der V2-Geometrie ermittelt)
-ANZAHL_TEILE   = None      # None = automatisch maximal befüllen
-FUELLGRAD      = 1.0       # 1.0 = voll, 0.5 = halb voll (nur falls ANZAHL_TEILE = None)
-BODEN_Z        = 1.0       # Oberkante Bodenplatte des V2-Schachts
-LUFT_OBEN      = 1.0       # Sicherheitsabstand zur Oberkante in mm
-
-# Position der Rohteile im Schacht (Innenraum X 5..115, Y 0..50):
-# X = 10 -> Teil (100 mm) zentriert, 5 mm Spiel pro Seite. Y = 0 -> passgenau.
-POSITION_X     = 10.0
-POSITION_Y     = 0.0
-
-# Schieber: Ruheposition liegt im CAD bei X 120..290, er schiebt in
-# -X-Richtung durch das runde Loch (Ø25, Mitte Y=25/Z=25) in der
-# rechten Schachtwand. Mit dem Hub simulierst du den Ausschiebevorgang:
-# 0 = eingefahren, ca. 110-115 = unterstes Teil komplett ausgeschoben.
-SCHIEBER_HUB   = 0.0       # Hub in mm (in -X-Richtung)
-
-# Export des gefüllten Magazins (None = kein Export)
-EXPORT_DATEI = str(SKRIPT_ORDNER / "Magazin_gefuellt.stl")
-
 
 # ----------------------------------------------------------
-# 2) ASCII-STL lesen und schreiben (ohne Zusatzbibliotheken)
+# Hilfsfunktionen (zustandslos)
 # ----------------------------------------------------------
 def lade_stl(quelle: str) -> np.ndarray:
     """Liest eine ASCII-STL -> Array der Form (n, 3, 3)."""
@@ -128,102 +83,115 @@ def schreibe_stl(pfad: str, mesh: np.ndarray, name: str = "modell"):
 
 
 # ----------------------------------------------------------
-# 3) Dateien laden und vermessen
+# MagazinView-Klasse
 # ----------------------------------------------------------
-print("Lade STL-Dateien ...")
-magazin  = lade_stl(MAGAZIN_QUELLE)
-rohteil  = lade_stl(ROHTEIL_QUELLE)
-schieber = lade_stl(SCHIEBER_QUELLE)
+class MagazinView:
+    """
+    Lädt Magazin-STLs und berechnet die Bestückung.
+    Kein Rendering beim Konstruieren – show() explizit aufrufen.
+    """
 
-mag_min, mag_max = masse(magazin, "Magazin")
-rt_min,  rt_max  = masse(rohteil, "Rohteil")
-sch_min, sch_max = masse(schieber, "Schieber")
+    def __init__(
+        self,
+        magazin_quelle: str,
+        rohteil_quelle: str,
+        schieber_quelle: str,
+        anzahl_teile=None,
+        fuellgrad: float = 1.0,
+        boden_z: float = 1.0,
+        luft_oben: float = 1.0,
+        schieber_hub: float = 0.0,
+        position_x: float = 10.0,
+        position_y: float = 0.0,
+        export_datei: str = None,
+    ):
+        self._magazin      = lade_stl(magazin_quelle)
+        rohteil_raw        = lade_stl(rohteil_quelle)
+        self._schieber_raw = lade_stl(schieber_quelle)
+        self._export_datei = export_datei
 
-rt_groesse = rt_max - rt_min          # Abmessungen des Rohteils
-mag_groesse = mag_max - mag_min
+        # Rohteil normieren: Ecke (min) auf Ursprung legen
+        v = rohteil_raw.reshape(-1, 3)
+        rt_min, rt_max = v.min(axis=0), v.max(axis=0)
+        self._rohteil_raw = rohteil_raw - rt_min
+        rt_groesse = rt_max - rt_min
 
-# Rohteil normieren: Ecke (min) auf den Ursprung legen,
-# damit die Platzierung vorhersagbar ist
-rohteil = rohteil - rt_min
+        mag_v = self._magazin.reshape(-1, 3)
+        mag_min, mag_max = mag_v.min(axis=0), mag_v.max(axis=0)
 
-# Schieber-Hub anwenden (Bewegung in -X-Richtung)
-schieber = schieber + np.array([-SCHIEBER_HUB, 0.0, 0.0])
+        self._teil_hoehe = float(rt_groesse[2])
+        nutzhoehe        = float(mag_max[2]) - boden_z - luft_oben
+        kapazitaet       = max(int(nutzhoehe // self._teil_hoehe), 0)
+
+        if anzahl_teile is not None:
+            anzahl = anzahl_teile
+        else:
+            anzahl = max(int(round(kapazitaet * fuellgrad)), 0)
+
+        if anzahl > kapazitaet:
+            print(f"Warnung: {anzahl} Teile angefordert, "
+                  f"aber nur {kapazitaet} passen ins Magazin!")
+
+        self._teile = [
+            self._rohteil_raw + np.array([position_x, position_y, boden_z + i * self._teil_hoehe])
+            for i in range(anzahl)
+        ]
+
+        self._schieber_hub = schieber_hub
+        self._schieber = self._schieber_raw + np.array([-schieber_hub, 0.0, 0.0])
+
+    def set_schieber_hub(self, hub: float):
+        self._schieber_hub = hub
+        self._schieber = self._schieber_raw + np.array([-hub, 0.0, 0.0])
+
+    def show(self):
+        fig = plt.figure(figsize=(8, 11))
+        ax  = fig.add_subplot(111, projection="3d")
+
+        ax.add_collection3d(Poly3DCollection(
+            self._magazin, facecolor="lightgray", edgecolor="gray", alpha=0.25))
+        ax.add_collection3d(Poly3DCollection(
+            self._schieber, facecolor="darkorange", edgecolor="sienna", alpha=0.95))
+        for t in self._teile:
+            ax.add_collection3d(Poly3DCollection(
+                t, facecolor="steelblue", edgecolor="navy", alpha=0.9))
+
+        szene  = [self._magazin, self._schieber] + self._teile
+        alle_v = np.concatenate(szene).reshape(-1, 3)
+        smin, smax = alle_v.min(axis=0), alle_v.max(axis=0)
+        rand = 10
+        ax.set_xlim(smin[0] - rand, smax[0] + rand)
+        ax.set_ylim(smin[1] - rand, smax[1] + rand)
+        ax.set_zlim(smin[2] - rand, smax[2] + rand)
+        ax.set_box_aspect((smax - smin) + 2 * rand)
+        ax.set_xlabel("X [mm]")
+        ax.set_ylabel("Y [mm]")
+        ax.set_zlabel("Z [mm]")
+        ax.set_title(f"Magazin mit {len(self._teile)} Rohteilen und Schieber")
+        ax.view_init(elev=12, azim=-65)
+        plt.tight_layout()
+        plt.show()
+
+    def export(self, pfad: str = None):
+        ziel = pfad or self._export_datei
+        if ziel:
+            gesamt = np.concatenate([self._magazin, self._schieber] + self._teile)
+            schreibe_stl(ziel, gesamt, name="Magazin_gefuellt")
 
 
 # ----------------------------------------------------------
-# 4) Platzierung berechnen
+# Demo (python View/magazin.py)
 # ----------------------------------------------------------
-# X/Y: zentriert im Magazin (falls nicht manuell vorgegeben)
-pos_x = POSITION_X if POSITION_X is not None else \
-    mag_min[0] + (mag_groesse[0] - rt_groesse[0]) / 2
-pos_y = POSITION_Y if POSITION_Y is not None else \
-    mag_min[1] + (mag_groesse[1] - rt_groesse[1]) / 2
+if __name__ == "__main__":
+    BASIS_URL = ("https://raw.githubusercontent.com/pamacker79/"
+                 "RoboterPoweredCNC/main/View/Magazin_Modell/")
 
-# Z: Stapelbeginn (falls nicht vorgegeben: Unterkante Magazin)
-boden_z = BODEN_Z if BODEN_Z is not None else float(mag_min[2])
-
-# Kapazität: wie viele Teile passen übereinander?
-teil_hoehe = float(rt_groesse[2])
-nutzhoehe = float(mag_max[2]) - boden_z - LUFT_OBEN
-kapazitaet = max(int(nutzhoehe // teil_hoehe), 0)
-
-if ANZAHL_TEILE is not None:
-    anzahl = ANZAHL_TEILE
-else:
-    anzahl = max(int(round(kapazitaet * FUELLGRAD)), 0)
-
-if anzahl > kapazitaet:
-    print(f"Warnung: {anzahl} Teile angefordert, "
-          f"aber nur {kapazitaet} passen ins Magazin!")
-
-print(f"\nPlatzierung: X={pos_x:.1f}, Y={pos_y:.1f}, Stapelbeginn Z={boden_z:.1f}")
-print(f"Kapazität: {kapazitaet} Teile à {teil_hoehe:.1f} mm "
-      f"-> {anzahl} Teile werden platziert\n")
-
-teile = []
-for i in range(anzahl):
-    versatz = np.array([pos_x, pos_y, boden_z + i * teil_hoehe])
-    teile.append(rohteil + versatz)
-
-
-# ----------------------------------------------------------
-# 5) 3D-Ansicht
-# ----------------------------------------------------------
-fig = plt.figure(figsize=(8, 11))
-ax = fig.add_subplot(111, projection="3d")
-
-ax.add_collection3d(
-    Poly3DCollection(magazin, facecolor="lightgray", edgecolor="gray", alpha=0.25)
-)
-ax.add_collection3d(
-    Poly3DCollection(schieber, facecolor="darkorange", edgecolor="sienna", alpha=0.95)
-)
-for t in teile:
-    ax.add_collection3d(
-        Poly3DCollection(t, facecolor="steelblue", edgecolor="navy", alpha=0.9)
+    mv = MagazinView(
+        magazin_quelle  = BASIS_URL + "Magazin_V2.stl",
+        rohteil_quelle  = BASIS_URL + "Roh_Teil.stl",
+        schieber_quelle = BASIS_URL + "Magazin_Schieber.stl",
+        fuellgrad       = 1.0,
+        export_datei    = str(Path(__file__).parent / "Magazin_gefuellt.stl"),
     )
-
-# Achsen automatisch an die Gesamtszene anpassen
-szene = [magazin, schieber] + teile
-alle_v = np.concatenate(szene).reshape(-1, 3)
-smin, smax = alle_v.min(axis=0), alle_v.max(axis=0)
-rand = 10
-ax.set_xlim(smin[0] - rand, smax[0] + rand)
-ax.set_ylim(smin[1] - rand, smax[1] + rand)
-ax.set_zlim(smin[2] - rand, smax[2] + rand)
-ax.set_box_aspect((smax - smin) + 2 * rand)
-ax.set_xlabel("X [mm]")
-ax.set_ylabel("Y [mm]")
-ax.set_zlabel("Z [mm]")
-ax.set_title(f"Magazin mit {len(teile)} Rohteilen und Schieber")
-ax.view_init(elev=12, azim=-65)
-plt.tight_layout()
-plt.show()
-
-
-# ----------------------------------------------------------
-# 6) Export des gefüllten Magazins (inkl. Schieber)
-# ----------------------------------------------------------
-if EXPORT_DATEI:
-    gesamt = np.concatenate([magazin, schieber] + teile)
-    schreibe_stl(EXPORT_DATEI, gesamt, name="Magazin_gefuellt")
+    mv.show()
+    mv.export()
