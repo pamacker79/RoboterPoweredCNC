@@ -347,14 +347,19 @@ class RobotController:
                 self._trigger_auto_fault("Timeout: Anheben nach Ablage")
 
     def _auto_try_start(self):
-        """Poll for a part at pickup_world; start sequence when one is found."""
+        """Poll pickup and place zones; start sequence only when both conditions are met."""
         if self.pickup_world is None or self.place_world is None:
             return
 
         pw_x, pw_y = self.pickup_world
         pl_x, pl_y = self.place_world
 
-        # Determine pickup Z and reserve the part
+        # ── Guard 1: place target must be free ───────────────────────────────
+        if self.wpm is not None and self.wpm.has_part_at(pl_x, pl_y, _SUCTION_RADIUS):
+            self.hmi.setStatus("Automatik — Absetzplatz belegt, warte...", "lightsalmon")
+            return
+
+        # ── Guard 2: part must be available at pickup zone ───────────────────
         pick_z = None
         pending = None
 
@@ -362,18 +367,17 @@ class RobotController:
             coords = self.magazin_view.get_pickup_coordinates()
             if coords is not None:
                 pick_z = self._world_z_to_mcs(coords[2])
-                # No reservation needed for magazine — pick_top_part() is called in _A_GRAB
 
         if pick_z is None and self.wpm is not None:
             part = self.wpm.pick_nearest(pw_x, pw_y, _SUCTION_RADIUS)
             if part is not None:
-                pick_z = 0.0   # free parts are at Z=0, suction cup lowers to 0
+                pick_z = 0.0
                 pending = part
 
         if pick_z is None:
             return  # nothing to pick yet
 
-        # Extra gate (e.g. H-Bot must be at home before Robot 3 can pick)
+        # ── Guard 3: optional external gate (e.g. H-Bot at home) ─────────────
         if self.pickup_gate is not None and not self.pickup_gate():
             return
 
