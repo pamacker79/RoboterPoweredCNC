@@ -64,8 +64,15 @@ class Machine:
         self.CncTrafo = hBot()
         self.wpm = WorkpieceManager()
 
-        self.hbotX = 0.0
-        self.hbotY = 0.0
+        # H-Bot Startposition (Arm an Oberkante)
+        _HBOT_START_X = 0.0
+        _HBOT_START_Y = 200.0   # ← hier Oberkante-Y eintragen
+        self.hbotX = _HBOT_START_X
+        self.hbotY = _HBOT_START_Y
+        self.CncTrafo.mcsAxisX.Sollposition  = _HBOT_START_X
+        self.CncTrafo.mcsAxisX.ActualPosition = _HBOT_START_X
+        self.CncTrafo.mcsAxisY.Sollposition  = _HBOT_START_Y
+        self.CncTrafo.mcsAxisY.ActualPosition = _HBOT_START_Y
 
         # H-Bot auto state
         self._hb_state = _HB_IDLE
@@ -224,8 +231,8 @@ class Machine:
                     self._hb_state = _HB_RETURN
 
         elif self._hb_state == _HB_RETURN:
-            self.CncTrafo.mcsAxisX.Sollposition = 0.0
-            self.CncTrafo.mcsAxisY.Sollposition = 0.0
+            self.CncTrafo.mcsAxisX.Sollposition = 300
+            self.CncTrafo.mcsAxisY.Sollposition = 100   
             if self._hb_tick >= _HB_TICKS_PER_MOVE:
                 self._hb_state    = _HB_DONE
                 self._hb_tick     = 0
