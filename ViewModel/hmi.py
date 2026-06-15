@@ -23,7 +23,7 @@ class Hmi:
             parent,
             bg="lightblue",
             width=400,
-            height=370,
+            height=410,
             relief="ridge",
             borderwidth=2
         )
@@ -59,17 +59,11 @@ class Hmi:
             self.hmiControl.OperationMode = 0 if selected == "Hand" else 1
             self._update_mode_display()
 
-        def on_start_click():
-            self.hmiControl.Start = True
-            self.hmiControl.Stop = False
-
-        def on_stop_click():
-            self.hmiControl.Start = False
-            self.hmiControl.Stop = True
+        def on_saugen_click():
+            self.hmiControl.Saugen = True
 
         def on_reset_click():
             self.hmiControl.Reset = True
-            self.hmiControl.Start = False
 
         def on_override_changed(val):
             pct = int(float(val))
@@ -156,21 +150,17 @@ class Hmi:
         )
         self.status_label.place(x=links, y=262, width=380, height=28)
 
-        # Schaltflächen Start / Reset / Stop
-        button_start = tk.Button(
-            self.root, text="Start", width=10, command=on_start_click
-        )
-        button_start.place(x=10, y=305)
-
+        # Schaltflächen Reset / Saugen
         button_reset = tk.Button(
             self.root, text="Reset", width=10, command=on_reset_click
         )
-        button_reset.place(x=140, y=305)
+        button_reset.place(x=10, y=305)
 
-        button_stop = tk.Button(
-            self.root, text="Stop", width=10, command=on_stop_click
+        self._saugen_btn = tk.Button(
+            self.root, text="Saugen", width=22, command=on_saugen_click,
+            bg="lightyellow"
         )
-        button_stop.place(x=270, y=305)
+        self._saugen_btn.place(x=140, y=305)
 
         # Initialzustand der Modus-Anzeige setzen
         self._update_mode_display()
@@ -271,6 +261,11 @@ class Hmi:
             self.y_label["text"] = round(self.hmiState.axisYPosition, 1)
             self.z_label["text"] = round(self.hmiState.axisZPosition, 1)
             self.r_label["text"] = round(self.hmiState.axisRPosition, 1)
+
+    def set_saugen_enabled(self, enabled: bool):
+        """Enable or disable the Saugen button (disabled in auto mode)."""
+        state = "normal" if enabled else "disabled"
+        self._saugen_btn.config(state=state)
 
     def setStatus(self, text, color="lightgreen"):
         """Update the status label shown to the operator."""

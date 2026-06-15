@@ -8,14 +8,17 @@ Dependencies: none
 """
 
 SCARA_LIMITS = {
-    "acsAxis1": (-170.0,  170.0),   # Gelenk 1          [Grad]
-    "acsAxis2": (-145.0,  145.0),   # Gelenk 2          [Grad]
-    "acsAxis3": (-280.0,  0.0),   # Hubachse           [mm]
-    "acsAxis4": (-360.0,  360.0),   # Werkzeugdrehachse  [Grad]
-    "mcsAxisX": (-875.0,  875.0),   # X-Achse            [mm]
-    "mcsAxisY": (-875.0,  875.0),   # Y-Achse            [mm]
-    "mcsAxisZ": (-280.0,    0.0),   # Z-Achse = acsAxis3 [mm]  (0=oben, -280=unten)
-    "mcsAxisR": (-360.0,  360.0),   # Rotationsachse     [Grad]
+    # (min, max, velocity_per_tick)
+    # velocity at 100 Hz: 3 deg/tick = 300 deg/s, 2 mm/tick = 200 mm/s
+    "acsAxis1": (-170.0,  170.0,  3.0),  # Gelenk 1          [Grad]
+    "acsAxis2": (-145.0,  145.0,  3.0),  # Gelenk 2          [Grad]
+    "acsAxis3": (-280.0,    0.0,  2.0),  # Hubachse           [mm]
+    "acsAxis4": (-360.0,  360.0,  5.0),  # Werkzeugdrehachse  [Grad]
+    # MCS axes are derived values — no velocity limit (instant update from kinematics)
+    "mcsAxisX": (-875.0,  875.0),        # X-Achse            [mm]
+    "mcsAxisY": (-875.0,  875.0),        # Y-Achse            [mm]
+    "mcsAxisZ": (-280.0,    0.0),        # Z-Achse = acsAxis3 [mm]
+    "mcsAxisR": (-360.0,  360.0),        # Rotationsachse     [Grad]
 }
 
 HBOT_LIMITS = {

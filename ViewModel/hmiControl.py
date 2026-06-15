@@ -30,8 +30,7 @@ class hmiControl:
         self.MoveJ4Plus = False
         self.MoveJ4Neg = False
 
-        self.Start = False
-        self.Stop = False
+        self.Saugen = False   # toggle: pick up or release a workpiece
         self.Reset = False
 
         self.OperationMode = 0  # 0=Manual / 1=Automatic

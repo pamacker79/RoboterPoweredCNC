@@ -9,12 +9,13 @@ Dependencies: none
 
 
 class Axis:
-    def __init__(self, min_pos=None, max_pos=None):
+    def __init__(self, min_pos=None, max_pos=None, velocity=None):
         self._sollposition = 0.0
         self.ActualPosition = 0.0
         self.min_pos = min_pos
         self.max_pos = max_pos
         self._at_limit = False
+        self.velocity = velocity   # max change per cyclic() call; None = instant
 
     @property
     def Sollposition(self):
@@ -46,7 +47,14 @@ class Axis:
         return self._sollposition
 
     def cyclic(self):
-        self.ActualPosition = self._sollposition
+        if self.velocity is None:
+            self.ActualPosition = self._sollposition
+        else:
+            diff = self._sollposition - self.ActualPosition
+            if abs(diff) <= self.velocity:
+                self.ActualPosition = self._sollposition
+            else:
+                self.ActualPosition += self.velocity if diff > 0 else -self.velocity
 
 
 if __name__ == "__main__":

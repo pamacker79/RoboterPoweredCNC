@@ -1,60 +1,115 @@
 """
 Module: RobotController
 Purpose: Per-robot orchestration layer that bridges HMI input, kinematics, and 3D view.
-Responsibilities: Process HMI commands each tick, run forward/inverse kinematics, advance CNC
-                  path with override, update 3D view, surface fault state to HMI status label.
-Inputs:  hmiControl flags (from Hmi), kinematics model (Scara), view (View.Scara), hmiState.
+Responsibilities:
+  - Manual mode: jog control, suction-range check on "Saugen", part release to Z=0.
+  - Auto mode:   state-machine sequence (approach → lower → grab → lift → place → lift).
+  - Mode switch: auto-sequence aborts immediately on switch to manual.
+Inputs:  hmiControl flags, kinematics model (Scara), view (View.Scara), WorkpieceManager,
+         optional MagazinViewPV (Robot 1 only).
 Outputs: Updated axis positions, actor transforms, hmiState, HMI status display.
-Dependencies: ViewModel.hmiControl, ViewModel.hmiState, Model.Scara, View.Scara, Model.RobotConfig
+Dependencies: ViewModel.hmiControl, ViewModel.hmiState, Model.Scara, View.Scara,
+              Model.RobotConfig, Model.WorkpieceManager
 """
 
 import math
 from Model.RobotConfig import SCARA_HOME
 
+# ── Auto-sequence states ─────────────────────────────────────────────────────
+_A_IDLE             = 0
+_A_MOVE_ABOVE_PICK  = 1
+_A_LOWER_TO_PICK    = 2
+_A_GRAB             = 3
+_A_LIFT_AFTER_PICK  = 4
+_A_MOVE_ABOVE_PLACE = 5
+_A_LOWER_TO_PLACE   = 6
+_A_RELEASE          = 7
+_A_LIFT_AFTER_PLACE = 8
+
+_GRAB_TICKS      = 10     # ticks for vacuum engage/release dwell (~100 ms)
+_AUTO_TIMEOUT    = 600    # ticks before a motion state triggers fault (~6 s)
+_ARRIVED_TOL_DEG = 1.5    # deg — arrival tolerance for angular axes
+_ARRIVED_TOL_MM  = 1.5    # mm  — arrival tolerance for linear axes
+_SUCTION_RADIUS    = 60.0   # mm — max XY distance for manual suction
+_SUCTION_RADIUS_Z  = 30.0   # mm — max Z distance for manual suction
+
 
 class RobotController:
     def __init__(self, robot_trafo, robot_view, hmi, hmi_state,
+                 workpiece_manager=None, magazin_view=None,
+                 pickup_world=None, place_world=None,
+                 pickup_gate=None,
                  cnc_control=None, cnc_program_path=None):
-        self.robot_trafo = robot_trafo
-        self.robot_view = robot_view
-        self.hmi = hmi
-        self.hmi_state = hmi_state
-        self.cnc_control = cnc_control
+        """
+        pickup_world : (wx, wy) world position the robot polls for a part (auto mode).
+        place_world  : (wx, wy) world position the robot drops the part (auto mode).
+        magazin_view : MagazinViewPV — supply only for the robot that serves the magazine.
+        """
+        self.robot_trafo   = robot_trafo
+        self.robot_view    = robot_view
+        self.hmi           = hmi
+        self.hmi_state     = hmi_state
+        self.wpm           = workpiece_manager
+        self.magazin_view  = magazin_view
+        self.pickup_world  = pickup_world   # (wx, wy) or None
+        self.place_world   = place_world    # (wx, wy) or None
+        self.pickup_gate   = pickup_gate    # optional callable() -> bool extra condition
+        self.cnc_control   = cnc_control
         self.cnc_program_path = cnc_program_path
 
-        self._gripper_closed = False
-        self._joint_mode = True
-        self._manual_mode = True
-        self._interpolated_path = None
-        self._fault = False
-        self._override_tick = 0
+        self._gripper_closed  = False
+        self._joint_mode      = True
+        self._manual_mode     = True
+        self._fault           = False
+        self._override_tick   = 0
+
+        # carried part tracking (manual mode)
+        self._carried_part_id = None   # wpm part id, or "magazine" sentinel
+
+        # auto-sequence state
+        self._auto_state   = _A_IDLE
+        self._auto_tick    = 0
+        self._pick_wx      = 0.0
+        self._pick_wy      = 0.0
+        self._pick_wz      = 0.0   # world Z of part top
+        self._place_wx     = 0.0
+        self._place_wy     = 0.0
+        self._pending_wpm_part = None  # part dict reserved during approach
 
         if hasattr(self.robot_view, "set_gripper"):
-            self.robot_view.set_gripper(closed=self._gripper_closed)
+            self.robot_view.set_gripper(closed=False)
 
+    # =========================================================================
+    # PUBLIC — called from main loop
+    # =========================================================================
     def update_hmi(self):
         hmi_ctrl = self.hmi.getHmiControl()
+        is_auto  = (hmi_ctrl.OperationMode == 1)
 
-        # Reset: clear fault and drive all axes to home position
+        # ── Reset ────────────────────────────────────────────────────────────
         if getattr(hmi_ctrl, "Reset", False):
             self._fault = False
+            self._auto_state = _A_IDLE
+            self._cancel_vacuum()
             self.robot_trafo.acsAxis1.Sollposition = SCARA_HOME["acsAxis1"]
             self.robot_trafo.acsAxis2.Sollposition = SCARA_HOME["acsAxis2"]
             self.robot_trafo.acsAxis3.Sollposition = SCARA_HOME["acsAxis3"]
             self.robot_trafo.acsAxis4.Sollposition = SCARA_HOME["acsAxis4"]
-            hmi_ctrl.Reset = False  # consume pulse
+            hmi_ctrl.Reset = False
 
-        # Determine operating context for status check
-        is_manual = hmi_ctrl.OperationMode == 0
-        coord_ok  = hmi_ctrl.CoordSystem in ["Joint", "Welt", "Werkzeug"]
+        # ── Saugen button only active in manual mode ─────────────────────────
+        if hasattr(self.hmi, "set_saugen_enabled"):
+            self.hmi.set_saugen_enabled(not is_auto)
 
-        # Status priority: fault > limit > missing coord > normal
+        # ── Status display ────────────────────────────────────────────────────
         if self._fault:
             self.hmi.setStatus("STÖRUNG — Reset drücken", "red")
+        elif is_auto and self._auto_state != _A_IDLE:
+            self.hmi.setStatus(f"Automatik — Schritt {self._auto_state}/8", "lightyellow")
+        elif is_auto:
+            self.hmi.setStatus("Automatik — wartet auf Teil", "lightcyan")
         elif self._any_at_limit():
             self.hmi.setStatus("Achse an Grenzwert", "orange")
-        elif is_manual and not coord_ok:
-            self.hmi.setStatus("Koordinatensystem wählen!", "orange")
         else:
             self.hmi.setStatus("Bereit", "lightgreen")
 
@@ -63,22 +118,16 @@ class RobotController:
             self.hmi.setHmiState(self.hmi_state)
             return
 
-        self._manual_mode = is_manual
-
-        if self._manual_mode:
-            # Only jog if the operator has selected a coordinate system
-            if coord_ok:
-                self._joint_mode = self._handle_manual_control(hmi_ctrl)
-            # else: keep _joint_mode as-is; forward() keeps MCS in sync, no motion
-            self._handle_gripper(hmi_ctrl)
+        # ── Dispatch by mode ─────────────────────────────────────────────────
+        if is_auto:
+            self._manual_mode = False
+            self._run_auto(hmi_ctrl)
         else:
-            self._joint_mode = False
-            if self.cnc_control is not None and getattr(hmi_ctrl, "Start", False):
-                self.cnc_control.load_from_path(self.cnc_program_path)
-                self._interpolated_path = iter(
-                    self.cnc_control.interpolate_path(step_size=3.0)
-                )
-                hmi_ctrl.Start = False
+            # Switching to manual aborts auto sequence immediately
+            if not self._manual_mode:
+                self._auto_state = _A_IDLE
+            self._manual_mode = True
+            self._run_manual(hmi_ctrl)
 
         self._update_hmi_state()
         self.hmi.setHmiState(self.hmi_state)
@@ -89,7 +138,7 @@ class RobotController:
                 self.robot_trafo.forward()
             else:
                 self.robot_trafo.backward()
-                self.robot_trafo.forward()  # MCS mit erreichter Position synchronisieren
+                self.robot_trafo.forward()
         except ValueError as e:
             print(f"Kinematik Fehler: {e}")
             for axis in [
@@ -102,23 +151,20 @@ class RobotController:
             self._fault = True
 
     def update_cnc_path(self):
-        if self.cnc_control is None or self._interpolated_path is None:
+        """CNC path execution (Robot 1 only, manual auto-mode via G-code — kept for compatibility)."""
+        if self.cnc_control is None or not hasattr(self, '_interpolated_path') or self._interpolated_path is None:
             return
-
-        # Speed override: 100% = 1 waypoint/tick, 50% = 1 per 2 ticks, etc.
         override = getattr(self.hmi.getHmiControl(), "OverridePercent", 100)
         ticks_per_step = max(1, round(100 / max(1, override)))
         self._override_tick += 1
         if self._override_tick < ticks_per_step:
             return
         self._override_tick = 0
-
         self.cnc_control.position = {
             "X": self.robot_trafo.mcsAxisX.ActualPosition,
             "Y": self.robot_trafo.mcsAxisY.ActualPosition,
             "Z": self.robot_trafo.mcsAxisZ.ActualPosition,
         }
-
         point = next(self._interpolated_path, None)
         if point is not None:
             self.robot_trafo.mcsAxisX.Sollposition = point["X"]
@@ -126,16 +172,300 @@ class RobotController:
             self.robot_trafo.mcsAxisZ.Sollposition = point["Z"]
 
     def update_view(self):
+        # Use ActualPosition so the 3D model shows where the robot physically IS,
+        # not where it wants to be (Sollposition may be ahead of actual motion).
+        # +180° on axis1: STL arm points in -X at angle=0, kinematics assumes +X.
         self.robot_view.update_joints(
-            self.robot_trafo.acsAxis1.getSetPosition(),
-            self.robot_trafo.acsAxis2.getSetPosition(),
-            self.robot_trafo.acsAxis4.getSetPosition(),
-            z_height=self.robot_trafo.acsAxis3.getSetPosition()
+            self.robot_trafo.acsAxis1.ActualPosition + 180.0,
+            self.robot_trafo.acsAxis2.ActualPosition,
+            self.robot_trafo.acsAxis4.ActualPosition,
+            z_height=self.robot_trafo.acsAxis3.ActualPosition
         )
 
-    # ============================================================
-    # PRIVATE HELPERS
-    # ============================================================
+    # =========================================================================
+    # MANUAL MODE
+    # =========================================================================
+    def _run_manual(self, hmi_ctrl):
+        coord_system = getattr(hmi_ctrl, "CoordSystem", "wählen")
+        coord_ok = coord_system in ["Joint", "Welt", "Werkzeug"]
+
+        if not coord_ok:
+            self.hmi.setStatus("Koordinatensystem wählen!", "orange")
+        else:
+            self._joint_mode = self._handle_manual_control(hmi_ctrl)
+
+        # "Saugen" toggle — one-shot flag consumed here
+        if getattr(hmi_ctrl, "Saugen", False):
+            hmi_ctrl.Saugen = False
+            self._handle_saugen()
+
+    def _handle_saugen(self):
+        """Pick up or release a workpiece depending on current carry state."""
+        if self._gripper_closed:
+            # Release: drop part at (tcp_x, tcp_y, Z=0)
+            self._release_part()
+        else:
+            # Attempt pickup: check all parts in scene
+            self._attempt_pickup()
+
+    def _attempt_pickup(self):
+        tcp_wx, tcp_wy, tcp_wz = self._tcp_world_pos()
+
+        # ① Check magazine top part
+        if self.magazin_view is not None:
+            mag_coords = self.magazin_view.get_pickup_coordinates()
+            if mag_coords is not None:
+                mx, my, mz = mag_coords
+                dist_xy = math.sqrt((tcp_wx - mx) ** 2 + (tcp_wy - my) ** 2)
+                dist_z  = abs(tcp_wz - mz)
+                if dist_xy <= _SUCTION_RADIUS:
+                    if dist_z <= _SUCTION_RADIUS_Z:
+                        self.magazin_view.pick_top_part()
+                        self._activate_vacuum()
+                        self._carried_part_id = "magazine"
+                        self.hmi.setStatus("Teil aus Magazin angesaugt", "lightgreen")
+                    else:
+                        self.hmi.setStatus(
+                            f"Kein Rohteil in der Nähe des Saugers — Höhendifferenz: {dist_z:.0f} mm",
+                            "orange"
+                        )
+                    return
+
+        # ② Check free parts in WorkpieceManager
+        if self.wpm is not None:
+            part = self.wpm.pick_nearest(tcp_wx, tcp_wy, _SUCTION_RADIUS)
+            if part is not None:
+                part_wz = 0.0   # free parts always rest at Z = 0
+                dist_z  = abs(tcp_wz - part_wz)
+                if dist_z <= _SUCTION_RADIUS_Z:
+                    self.wpm.remove_part(part["id"])
+                    self._activate_vacuum()
+                    self._carried_part_id = part["id"]
+                    self.hmi.setStatus("Rohteil angesaugt", "lightgreen")
+                else:
+                    self.hmi.setStatus(
+                        f"Kein Rohteil in der Nähe des Saugers — Höhendifferenz: {dist_z:.0f} mm",
+                        "orange"
+                    )
+                return
+
+        # ③ Nothing within XY radius
+        self.hmi.setStatus("Kein Rohteil in der Nähe des Saugers", "orange")
+
+    def _release_part(self):
+        """Drop carried part at TCP XY, Z=0, preserving current TCP rotation."""
+        if self.wpm is not None:
+            tcp_wx, tcp_wy, _ = self._tcp_world_pos()
+            self.wpm.add_part(
+                self.robot_view.pl,
+                tcp_wx,
+                tcp_wy,
+                rotation_z=self._tcp_rotation(),
+            )
+        self._cancel_vacuum()
+        self._carried_part_id = None
+        self.hmi.setStatus("Teil abgelegt (Z=0)", "lightgreen")
+
+    # =========================================================================
+    # AUTO MODE
+    # =========================================================================
+    def _run_auto(self, hmi_ctrl):
+        self._auto_tick += 1
+
+        if self._auto_state == _A_IDLE:
+            self._auto_try_start()
+
+        elif self._auto_state == _A_MOVE_ABOVE_PICK:
+            self._set_mcs_target(self._pick_wx, self._pick_wy, 0.0)
+            if self._is_at_target():
+                self._next_auto_state()
+            elif self._auto_tick >= _AUTO_TIMEOUT:
+                self._trigger_auto_fault("Timeout: Anfahrt Pickup-Position")
+
+        elif self._auto_state == _A_LOWER_TO_PICK:
+            self._set_mcs_target(self._pick_wx, self._pick_wy, self._pick_wz)
+            if self._is_at_target():
+                self._next_auto_state()
+            elif self._auto_tick >= _AUTO_TIMEOUT:
+                self._trigger_auto_fault("Timeout: Absenken zum Bauteil")
+
+        elif self._auto_state == _A_GRAB:
+            # One-shot: activate vacuum and remove part from source on first tick
+            if self._auto_tick == 1:
+                self._activate_vacuum()
+                if self._pending_wpm_part is not None:
+                    self.wpm.remove_part(self._pending_wpm_part["id"])
+                    self._pending_wpm_part = None
+                elif self.magazin_view is not None:
+                    self.magazin_view.pick_top_part()
+            if self._auto_tick >= _GRAB_TICKS:
+                self._next_auto_state()
+
+        elif self._auto_state == _A_LIFT_AFTER_PICK:
+            self._set_mcs_target(self._pick_wx, self._pick_wy, 0.0)
+            if self._is_at_target():
+                self._next_auto_state()
+            elif self._auto_tick >= _AUTO_TIMEOUT:
+                self._trigger_auto_fault("Timeout: Anheben nach Pickup")
+
+        elif self._auto_state == _A_MOVE_ABOVE_PLACE:
+            self._set_mcs_target(self._place_wx, self._place_wy, 0.0)
+            if self._is_at_target():
+                self._next_auto_state()
+            elif self._auto_tick >= _AUTO_TIMEOUT:
+                self._trigger_auto_fault("Timeout: Anfahrt Ablageposition")
+
+        elif self._auto_state == _A_LOWER_TO_PLACE:
+            self._set_mcs_target(self._place_wx, self._place_wy, self._pick_wz)
+            if self._is_at_target():
+                self._next_auto_state()
+            elif self._auto_tick >= _AUTO_TIMEOUT:
+                self._trigger_auto_fault("Timeout: Absenken zur Ablage")
+
+        elif self._auto_state == _A_RELEASE:
+            if self._auto_tick == 1:
+                self._cancel_vacuum()
+                if self.wpm is not None:
+                    # _place_wx/wy are SCARA-local — convert back to world for WPM
+                    vp = self.robot_view.position
+                    self.wpm.add_part(
+                        self.robot_view.pl,
+                        self._place_wx + vp[0],
+                        self._place_wy + vp[1],
+                        rotation_z=self._tcp_rotation(),
+                    )
+            if self._auto_tick >= _GRAB_TICKS:
+                self._next_auto_state()
+
+        elif self._auto_state == _A_LIFT_AFTER_PLACE:
+            self._set_mcs_target(self._place_wx, self._place_wy, 0.0)
+            if self._is_at_target():
+                self._auto_state = _A_IDLE
+                self._auto_tick  = 0
+                self._joint_mode = True
+            elif self._auto_tick >= _AUTO_TIMEOUT:
+                self._trigger_auto_fault("Timeout: Anheben nach Ablage")
+
+    def _auto_try_start(self):
+        """Poll for a part at pickup_world; start sequence when one is found."""
+        if self.pickup_world is None or self.place_world is None:
+            return
+
+        pw_x, pw_y = self.pickup_world
+        pl_x, pl_y = self.place_world
+
+        # Determine pickup Z and reserve the part
+        pick_z = None
+        pending = None
+
+        if self.magazin_view is not None:
+            coords = self.magazin_view.get_pickup_coordinates()
+            if coords is not None:
+                pick_z = self._world_z_to_mcs(coords[2])
+                # No reservation needed for magazine — pick_top_part() is called in _A_GRAB
+
+        if pick_z is None and self.wpm is not None:
+            part = self.wpm.pick_nearest(pw_x, pw_y, _SUCTION_RADIUS)
+            if part is not None:
+                pick_z = 0.0   # free parts are at Z=0, suction cup lowers to 0
+                pending = part
+
+        if pick_z is None:
+            return  # nothing to pick yet
+
+        # Extra gate (e.g. H-Bot must be at home before Robot 3 can pick)
+        if self.pickup_gate is not None and not self.pickup_gate():
+            return
+
+        # Convert world targets to SCARA-local MCS
+        vp = self.robot_view.position
+        self._pick_wx   = pw_x - vp[0]
+        self._pick_wy   = pw_y - vp[1]
+        self._pick_wz   = pick_z
+        self._place_wx  = pl_x - vp[0]
+        self._place_wy  = pl_y - vp[1]
+        self._pending_wpm_part = pending
+
+        self._auto_state = _A_MOVE_ABOVE_PICK
+        self._auto_tick  = 0
+        self._joint_mode = False
+
+    # =========================================================================
+    # HELPERS
+    # =========================================================================
+    def _next_auto_state(self):
+        self._auto_state += 1
+        self._auto_tick   = 0
+
+    def _is_at_target(self) -> bool:
+        """True when all ACS actual positions are within tolerance of their set-points."""
+        angular = [self.robot_trafo.acsAxis1,
+                   self.robot_trafo.acsAxis2,
+                   self.robot_trafo.acsAxis4]
+        linear  = [self.robot_trafo.acsAxis3]
+        return (
+            all(abs(a.ActualPosition - a.Sollposition) <= _ARRIVED_TOL_DEG for a in angular)
+            and
+            all(abs(a.ActualPosition - a.Sollposition) <= _ARRIVED_TOL_MM  for a in linear)
+        )
+
+    def _trigger_auto_fault(self, reason: str):
+        self._fault = True
+        self._auto_state = _A_IDLE
+        self._auto_tick  = 0
+        self._cancel_vacuum()
+        print(f"Auto-Fault: {reason}")
+
+    def _set_mcs_target(self, local_x, local_y, local_z):
+        self._joint_mode = False
+        self.robot_trafo.mcsAxisX.Sollposition = local_x
+        self.robot_trafo.mcsAxisY.Sollposition = local_y
+        self.robot_trafo.mcsAxisZ.Sollposition = local_z
+
+    def _activate_vacuum(self):
+        self._gripper_closed = True
+        if hasattr(self.robot_view, "set_gripper"):
+            self.robot_view.set_gripper(closed=True)
+        if hasattr(self.robot_view, "attach_part"):
+            self.robot_view.attach_part(True)
+
+    def _cancel_vacuum(self):
+        self._gripper_closed = False
+        if hasattr(self.robot_view, "set_gripper"):
+            self.robot_view.set_gripper(closed=False)
+        if hasattr(self.robot_view, "attach_part"):
+            self.robot_view.attach_part(False)
+
+    def _tcp_rotation(self) -> float:
+        """TCP world rotation in degrees (= acsAxis1 + acsAxis2 + acsAxis4 actual)."""
+        return (self.robot_trafo.acsAxis1.ActualPosition +
+                self.robot_trafo.acsAxis2.ActualPosition +
+                self.robot_trafo.acsAxis4.ActualPosition)
+
+    def _tcp_world_pos(self):
+        """
+        Return (wx, wy, wz) of the suction cup tip in world coordinates,
+        computed from ACS ActualPositions (where the robot physically IS).
+        """
+        a1  = math.radians(self.robot_trafo.acsAxis1.ActualPosition)
+        a2  = math.radians(self.robot_trafo.acsAxis2.ActualPosition)
+        L1  = self.robot_trafo.L1
+        L2  = self.robot_trafo.L2
+        lx  = L1 * math.cos(a1) + L2 * math.cos(a1 + a2)
+        ly  = L1 * math.sin(a1) + L2 * math.sin(a1 + a2)
+        vp  = self.robot_view.position
+        ref = getattr(self.robot_view, "tcp_z_ref", vp[2])
+        return (
+            lx + vp[0],
+            ly + vp[1],
+            ref + self.robot_trafo.acsAxis3.ActualPosition,
+        )
+
+    def _world_z_to_mcs(self, world_z: float) -> float:
+        """Convert an absolute world Z to the required mcsAxisZ (= acsAxis3) value."""
+        ref = getattr(self.robot_view, "tcp_z_ref", self.robot_view.position[2])
+        return world_z - ref
+
     def _any_at_limit(self):
         return any(a.is_at_limit() for a in [
             self.robot_trafo.acsAxis1, self.robot_trafo.acsAxis2,
@@ -146,16 +476,14 @@ class RobotController:
         coord_system = getattr(hmi_ctrl, "CoordSystem", "Joint")
         if coord_system not in ["Joint", "Welt", "Werkzeug"]:
             coord_system = "Joint"
-
         if coord_system == "Joint":
             da1, da2, da3, da4 = self._jog_delta(hmi_ctrl, step_joint)
             self.robot_trafo.jog_joint(da1, da2, da3, da4)
             return True
-
         dx, dy, dz, dr = self._jog_delta(hmi_ctrl, step_world)
         if coord_system == "Welt":
             self.robot_trafo.jog_world(dx, dy, dz, dr)
-        else:  # Werkzeug
+        else:
             self.robot_trafo.jog_tool(dx, dy, dz, dr)
         return False
 
@@ -166,22 +494,12 @@ class RobotController:
         dr = (step if hmi_ctrl.MoveRPlus else 0.0) - (step if hmi_ctrl.MoveRNeg else 0.0)
         return dx, dy, dz, dr
 
-    def _handle_gripper(self, hmi_ctrl):
-        if getattr(hmi_ctrl, "Start", False):
-            self._gripper_closed = True
-        if getattr(hmi_ctrl, "Stop", False):
-            self._gripper_closed = False
-        if hasattr(self.robot_view, "set_gripper"):
-            self.robot_view.set_gripper(closed=self._gripper_closed)
-        if hasattr(self.robot_view, "attach_part"):
-            self.robot_view.attach_part(self._gripper_closed)
-
     def _update_hmi_state(self):
         self.hmi_state.axisJ1Position = self.robot_trafo.acsAxis1.ActualPosition
         self.hmi_state.axisJ2Position = self.robot_trafo.acsAxis2.ActualPosition
         self.hmi_state.axisJ3Position = self.robot_trafo.acsAxis3.ActualPosition
         self.hmi_state.axisJ4Position = self.robot_trafo.acsAxis4.ActualPosition
-        self.hmi_state.axisXPosition = self.robot_trafo.mcsAxisX.ActualPosition
-        self.hmi_state.axisYPosition = self.robot_trafo.mcsAxisY.ActualPosition
-        self.hmi_state.axisZPosition = self.robot_trafo.mcsAxisZ.ActualPosition
-        self.hmi_state.axisRPosition = self.robot_trafo.mcsAxisR.ActualPosition
+        self.hmi_state.axisXPosition  = self.robot_trafo.mcsAxisX.ActualPosition
+        self.hmi_state.axisYPosition  = self.robot_trafo.mcsAxisY.ActualPosition
+        self.hmi_state.axisZPosition  = self.robot_trafo.mcsAxisZ.ActualPosition
+        self.hmi_state.axisRPosition  = self.robot_trafo.mcsAxisR.ActualPosition
