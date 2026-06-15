@@ -71,9 +71,7 @@ class Machine:
         self._hb_state = _HB_IDLE
         self._hb_tick  = 0
         self._hb_engrave_moves = [
-            (50.0,  50.0), (-50.0,  50.0),
-            (-50.0, -50.0), (50.0, -50.0),
-            (0.0,    0.0),
+            (0.0,  0.0), (10.0 ,  10.0), (20.0,  10.0), (30.0,  20.0),(0.0,    0.0),
         ]
         self._hb_move_idx = 0
         self.hbot_at_home = True   # Robot 3 checks this before picking
