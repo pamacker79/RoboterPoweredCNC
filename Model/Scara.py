@@ -46,7 +46,7 @@ class Scara:
 
         d = math.sqrt(self.mcsAxisX.Sollposition**2 + self.mcsAxisY.Sollposition**2) # Abstand von Ursprung zu Punkt (x, y)
 
-        if d > self.L1 + self.L2 or d < abs(self.L1 - self.L2):
+        if d > self.L1 + self.L2 + 1.0 or d < abs(self.L1 - self.L2) - 1.0:
             raise ValueError("Punkt außerhalb der Reichweite des Roboters") # Prüfen ob Punkt erreichbar ist
         
         cos_axis2 = (self.mcsAxisX.Sollposition**2 + self.mcsAxisY.Sollposition**2 - self.L1**2 - self.L2**2) / (2 * self.L1 * self.L2)

@@ -28,15 +28,17 @@ class Scara:
         position (tuple): Verschiebung des ganzen Roboters, z.B. (0, 800, 0)
     """
 
-    def __init__(self, data_folder_path=None, pl=None, position=(0, 0, 0)):
+    def __init__(self, data_folder_path=None, pl=None, position=(0, 0, 0), rotation_z=0.0):
         """
         Initialisiert den SCARA-Roboter.
+        rotation_z: zusätzliche Montagedrehung um Z-Achse in Grad (z.B. 180 = um 180° gedreht).
         """
 
         # --------------------------------------------------------
         # 1. Position / Offset des ganzen Roboters
         # --------------------------------------------------------
         self.position = position
+        self.rotation_z = rotation_z
 
         # --------------------------------------------------------
         # 2. Pfade konfigurieren
@@ -80,7 +82,14 @@ class Scara:
             self.pl = pl
 
         # --------------------------------------------------------
-        # 6. Meshes in die Szene einfügen
+        # 6. Montagedrehung auf statische Basis-Mesh anwenden
+        # --------------------------------------------------------
+        if abs(rotation_z) > 0.01:
+            rx, ry, rz = self.position
+            base_mesh.rotate_z(rotation_z, point=(rx, ry, rz), inplace=True)
+
+        # --------------------------------------------------------
+        # 7. Meshes in die Szene einfügen
         # --------------------------------------------------------
         self.base_actor = self.pl.add_mesh(base_mesh, color="lightblue")
         self.inner_arm_actor = self.pl.add_mesh(inner_arm_mesh, color="orange")
@@ -88,14 +97,14 @@ class Scara:
         self.spindle_actor = self.pl.add_mesh(spindle_mesh, color="gray")
 
         # --------------------------------------------------------
-        # 7. Original-Drehpunkte aus CAD
+        # 8. Original-Drehpunkte aus CAD
         # --------------------------------------------------------
         original_origin_inner = (0.0, 0.0, 0.0)
         original_origin_outer = (-325.0, 0.0, 0.0)
         original_origin_spindle = (-550.0, 0.0, 0.0)
 
         # --------------------------------------------------------
-        # 8. Drehpunkte ebenfalls verschieben
+        # 9. Drehpunkte ebenfalls verschieben
         # --------------------------------------------------------
         self.origin_inner = (
             original_origin_inner[0] + self.position[0],
@@ -121,7 +130,7 @@ class Scara:
         self.spindle_actor.origin = self.origin_spindle
 
         # --------------------------------------------------------
-        # 9. Sauger hinzufügen
+        # 10. Sauger hinzufügen
         # --------------------------------------------------------
         self._add_suction_cup()
 
@@ -232,11 +241,14 @@ class Scara:
         ox, oy, oz = self.origin_outer
         sx, sy, sz = self.origin_spindle
 
-        # Joint1Frame: innerer Arm dreht um Gelenk 1
+        # Montagedrehung: dreht den gesamten Arm um die Roboterbasis
+        base_angle = inner_angle + self.rotation_z
+
+        # Joint1Frame: innerer Arm dreht um Gelenk 1 + Montagedrehung
         t_j1 = vtk.vtkTransform()
         t_j1.PostMultiply()
         t_j1.Translate(-ix, -iy, -iz)
-        t_j1.RotateZ(inner_angle)
+        t_j1.RotateZ(base_angle)
         t_j1.Translate(ix, iy, iz)
         self.inner_arm_actor.SetUserTransform(t_j1)
 
@@ -247,7 +259,7 @@ class Scara:
         t_j2.RotateZ(outer_angle)
         t_j2.Translate(ox, oy, oz)
         t_j2.Translate(-ix, -iy, -iz)
-        t_j2.RotateZ(inner_angle)
+        t_j2.RotateZ(base_angle)
         t_j2.Translate(ix, iy, iz)
         self.outer_arm_actor.SetUserTransform(t_j2)
 
@@ -261,7 +273,7 @@ class Scara:
         t_tcp.RotateZ(outer_angle)
         t_tcp.Translate(ox, oy, oz)
         t_tcp.Translate(-ix, -iy, -iz)
-        t_tcp.RotateZ(inner_angle)
+        t_tcp.RotateZ(base_angle)
         t_tcp.Translate(ix, iy, iz)
         t_tcp.Translate(0.0, 0.0, z_height)
         self.spindle_actor.SetUserTransform(t_tcp)

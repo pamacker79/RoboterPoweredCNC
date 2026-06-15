@@ -336,12 +336,12 @@ class RobotController:
             if self._auto_tick == 1:
                 self._cancel_vacuum()
                 if self.wpm is not None:
-                    # _place_wx/wy are SCARA-local — convert back to world for WPM
-                    vp = self.robot_view.position
+                    # Convert SCARA-local back to world (accounts for mounting rotation)
+                    place_wx, place_wy = self._local_to_world(self._place_wx, self._place_wy)
                     self.wpm.add_part(
                         self.robot_view.pl,
-                        self._place_wx + vp[0],
-                        self._place_wy + vp[1],
+                        place_wx,
+                        place_wy,
                         rotation_z=self._tcp_rotation(),
                     )
             if self._auto_tick >= _GRAB_TICKS:
@@ -402,13 +402,14 @@ class RobotController:
         if self.pickup_gate is not None and not self.pickup_gate():
             return
 
-        # Convert world targets to SCARA-local MCS
-        vp = self.robot_view.position
-        self._pick_wx   = pw_x - vp[0]
-        self._pick_wy   = pw_y - vp[1]
+        # Convert world targets to SCARA-local MCS (accounts for mounting rotation).
+        # Clamp to reachable ring so targets slightly beyond arm reach move to
+        # the nearest reachable point; the 60 mm suction radius covers the gap.
+        self._pick_wx,  self._pick_wy  = self._clamp_local_to_reach(
+            *self._world_to_local(pw_x, pw_y))
         self._pick_wz   = pick_z
-        self._place_wx  = pl_x - vp[0]
-        self._place_wy  = pl_y - vp[1]
+        self._place_wx, self._place_wy = self._clamp_local_to_reach(
+            *self._world_to_local(pl_x, pl_y))
         self._place_wz  = self._world_z_to_mcs(_WPM_PART_TOP)  # lower until suction contacts part top
         self._pending_wpm_part = pending
 
@@ -463,10 +464,36 @@ class RobotController:
             self.robot_view.attach_part(False)
 
     def _tcp_rotation(self) -> float:
-        """TCP world rotation in degrees (= acsAxis1 + acsAxis2 + acsAxis4 actual)."""
-        return (self.robot_trafo.acsAxis1.ActualPosition +
-                self.robot_trafo.acsAxis2.ActualPosition +
-                self.robot_trafo.acsAxis4.ActualPosition)
+        """TCP world rotation in degrees (joint sum + mounting rotation)."""
+        joint_sum = (self.robot_trafo.acsAxis1.ActualPosition +
+                     self.robot_trafo.acsAxis2.ActualPosition +
+                     self.robot_trafo.acsAxis4.ActualPosition)
+        return joint_sum + getattr(self.robot_view, 'rotation_z', 0.0)
+
+    def _world_to_local(self, wx: float, wy: float):
+        """World XY → robot-local MCS XY, accounts for mounting rotation."""
+        vp = self.robot_view.position
+        dx = wx - vp[0]
+        dy = wy - vp[1]
+        rot = getattr(self.robot_view, 'rotation_z', 0.0)
+        if abs(rot) < 0.01:
+            return dx, dy
+        r = -math.radians(rot)   # inverse of mounting rotation
+        return (
+            dx * math.cos(r) - dy * math.sin(r),
+            dx * math.sin(r) + dy * math.cos(r),
+        )
+
+    def _local_to_world(self, lx: float, ly: float):
+        """Robot-local MCS XY → world XY, accounts for mounting rotation."""
+        vp = self.robot_view.position
+        rot = getattr(self.robot_view, 'rotation_z', 0.0)
+        if abs(rot) < 0.01:
+            return vp[0] + lx, vp[1] + ly
+        r = math.radians(rot)
+        dx = lx * math.cos(r) - ly * math.sin(r)
+        dy = lx * math.sin(r) + ly * math.cos(r)
+        return vp[0] + dx, vp[1] + dy
 
     def _tcp_world_pos(self):
         """
@@ -479,18 +506,31 @@ class RobotController:
         L2  = self.robot_trafo.L2
         lx  = L1 * math.cos(a1) + L2 * math.cos(a1 + a2)
         ly  = L1 * math.sin(a1) + L2 * math.sin(a1 + a2)
-        vp  = self.robot_view.position
-        ref = getattr(self.robot_view, "tcp_z_ref", vp[2])
-        return (
-            lx + vp[0],
-            ly + vp[1],
-            ref + self.robot_trafo.acsAxis3.ActualPosition,
-        )
+        wx, wy = self._local_to_world(lx, ly)
+        ref = getattr(self.robot_view, "tcp_z_ref", self.robot_view.position[2])
+        return wx, wy, ref + self.robot_trafo.acsAxis3.ActualPosition
 
     def _world_z_to_mcs(self, world_z: float) -> float:
         """Convert an absolute world Z to the required mcsAxisZ (= acsAxis3) value."""
         ref = getattr(self.robot_view, "tcp_z_ref", self.robot_view.position[2])
         return world_z - ref
+
+    def _clamp_local_to_reach(self, lx: float, ly: float):
+        """Clamp a local MCS target to the reachable ring, preserving direction.
+        Used when the world target is slightly beyond the arm's reach so the robot
+        moves as close as possible and the suction radius covers the remaining gap."""
+        L_max = self.robot_trafo.L1 + self.robot_trafo.L2
+        L_min = abs(self.robot_trafo.L1 - self.robot_trafo.L2)
+        d = math.sqrt(lx ** 2 + ly ** 2)
+        if d == 0.0:
+            return lx, ly
+        if d > L_max:
+            f = L_max / d
+            return lx * f, ly * f
+        if d < L_min:
+            f = L_min / d
+            return lx * f, ly * f
+        return lx, ly
 
     def _any_at_limit(self):
         return any(a.is_at_limit() for a in [
@@ -507,6 +547,12 @@ class RobotController:
             self.robot_trafo.jog_joint(da1, da2, da3, da4)
             return True
         dx, dy, dz, dr = self._jog_delta(hmi_ctrl, step_world)
+        # Rotate world-frame jog deltas into robot-local frame (accounts for mounting rotation)
+        rot = getattr(self.robot_view, 'rotation_z', 0.0)
+        if abs(rot) > 0.01:
+            r = -math.radians(rot)
+            dx, dy = (dx * math.cos(r) - dy * math.sin(r),
+                      dx * math.sin(r) + dy * math.cos(r))
         if coord_system == "Welt":
             self.robot_trafo.jog_world(dx, dy, dz, dr)
         else:

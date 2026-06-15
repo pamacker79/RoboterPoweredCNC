@@ -42,7 +42,7 @@ from ViewModel.RobotController import RobotController
 # ── World-coordinate landmarks ────────────────────────────────────────────────
 _HBOT_WORLD       = (0.0,   0.0)    # H-Bot work-surface centre
 _DEPOSIT_WORLD    = (700.0, 300.0)  # Robot 3 deposit position (to the right)
-_MAG_PICKUP_WORLD = (-400.0, -350.0)  # Magazine centre (matches MagazinViewPV position)
+_MAG_PICKUP_WORLD = (-300.0, -325.0)  # Magazine centre (matches MagazinViewPV position)
 
 # ── H-Bot auto-sequence states ────────────────────────────────────────────────
 _HB_IDLE      = 0
@@ -103,9 +103,9 @@ class Machine:
         self.sharedPlotter = pv.Plotter()
 
         # Robot 3 repositioned to (400, 300, 0) so it can reach H-Bot at (0,0)
-        self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-300,  250, 0))
+        self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-150,  250, 0), rotation_z=180.0)
         self.cncView     = HBotView( pl=self.sharedPlotter, position=(    0,    0, 150))
-        self.scaraView3  = ScaraView(pl=self.sharedPlotter, position=(850 ,  170, 0))
+        self.scaraView3  = ScaraView(pl=self.sharedPlotter, position=(900 ,  170, 0), rotation_z=180.0)
         self.magazinView = MagazinViewPV(pl=self.sharedPlotter, position=(-300, -325, 0))
 
         self.sharedPlotter.show_axes()
