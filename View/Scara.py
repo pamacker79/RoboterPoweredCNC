@@ -157,8 +157,10 @@ class Scara:
         ty = cy
         tz = tip_z
 
-        # World-Z of suction cup tip when acsAxis3 = 0 (used by RobotController for Z targeting)
-        self.tcp_z_ref = tz
+        # Mount: center=(tx,ty,tz-10) h=20 → extends from tz-20 to tz
+        # Cup  : center=(tx,ty,tz-22.5) dir=(0,0,-1) h=5 → tip at tz-25
+        # tcp_z_ref must be the ACTUAL TIP world-Z when acsAxis3=0, not the spindle bottom.
+        self.tcp_z_ref = tz - 25
 
         # Halterung (kleiner Zylinder, der aus der Spindel kommt)
         mount = pv.Cylinder(

@@ -25,6 +25,7 @@ _A_MOVE_ABOVE_PLACE = 5
 _A_LOWER_TO_PLACE   = 6
 _A_RELEASE          = 7
 _A_LIFT_AFTER_PLACE = 8
+_A_GO_HOME          = 9   # return to SCARA_HOME after each placement
 
 _GRAB_TICKS      = 10     # ticks for vacuum engage/release dwell (~100 ms)
 _AUTO_TIMEOUT    = 600    # ticks before a motion state triggers fault (~6 s)
@@ -32,6 +33,8 @@ _ARRIVED_TOL_DEG = 1.5    # deg — arrival tolerance for angular axes
 _ARRIVED_TOL_MM  = 1.5    # mm  — arrival tolerance for linear axes
 _SUCTION_RADIUS    = 60.0   # mm — max XY distance for manual suction
 _SUCTION_RADIUS_Z  = 30.0   # mm — max Z distance for manual suction
+# WPM parts rest on the floor with top surface at this world Z (part height = 20 mm)
+_WPM_PART_TOP    = 20.0
 
 
 class RobotController:
@@ -71,10 +74,13 @@ class RobotController:
         self._auto_tick    = 0
         self._pick_wx      = 0.0
         self._pick_wy      = 0.0
-        self._pick_wz      = 0.0   # world Z of part top
+        self._pick_wz      = 0.0   # mcsAxisZ to reach pickup surface
         self._place_wx     = 0.0
         self._place_wy     = 0.0
+        self._place_wz     = 0.0   # mcsAxisZ to reach place surface
         self._pending_wpm_part = None  # part dict reserved during approach
+
+        self._interpolated_path = None  # CNC path iterator (Robot 1 only)
 
         if hasattr(self.robot_view, "set_gripper"):
             self.robot_view.set_gripper(closed=False)
@@ -105,7 +111,7 @@ class RobotController:
         if self._fault:
             self.hmi.setStatus("STÖRUNG — Reset drücken", "red")
         elif is_auto and self._auto_state != _A_IDLE:
-            self.hmi.setStatus(f"Automatik — Schritt {self._auto_state}/8", "lightyellow")
+            self.hmi.setStatus(f"Automatik — Schritt {self._auto_state}/9", "lightyellow")
         elif is_auto:
             self.hmi.setStatus("Automatik — wartet auf Teil", "lightcyan")
         elif self._any_at_limit():
@@ -123,9 +129,12 @@ class RobotController:
             self._manual_mode = False
             self._run_auto(hmi_ctrl)
         else:
-            # Switching to manual aborts auto sequence immediately
+            # Switching to manual: abort auto sequence and release vacuum immediately
             if not self._manual_mode:
                 self._auto_state = _A_IDLE
+                self._auto_tick  = 0
+                self._cancel_vacuum()
+                self._pending_wpm_part = None
             self._manual_mode = True
             self._run_manual(hmi_ctrl)
 
@@ -152,7 +161,7 @@ class RobotController:
 
     def update_cnc_path(self):
         """CNC path execution (Robot 1 only, manual auto-mode via G-code — kept for compatibility)."""
-        if self.cnc_control is None or not hasattr(self, '_interpolated_path') or self._interpolated_path is None:
+        if self.cnc_control is None or self._interpolated_path is None:
             return
         override = getattr(self.hmi.getHmiControl(), "OverridePercent", 100)
         ticks_per_step = max(1, round(100 / max(1, override)))
@@ -235,7 +244,7 @@ class RobotController:
         if self.wpm is not None:
             part = self.wpm.pick_nearest(tcp_wx, tcp_wy, _SUCTION_RADIUS)
             if part is not None:
-                part_wz = 0.0   # free parts always rest at Z = 0
+                part_wz = _WPM_PART_TOP  # free parts on floor: top surface at Z = part height
                 dist_z  = abs(tcp_wz - part_wz)
                 if dist_z <= _SUCTION_RADIUS_Z:
                     self.wpm.remove_part(part["id"])
@@ -274,6 +283,7 @@ class RobotController:
 
         if self._auto_state == _A_IDLE:
             self._auto_try_start()
+            self._auto_tick = 0   # don't let tick counter grow unbounded while idle
 
         elif self._auto_state == _A_MOVE_ABOVE_PICK:
             self._set_mcs_target(self._pick_wx, self._pick_wy, 0.0)
@@ -316,7 +326,7 @@ class RobotController:
                 self._trigger_auto_fault("Timeout: Anfahrt Ablageposition")
 
         elif self._auto_state == _A_LOWER_TO_PLACE:
-            self._set_mcs_target(self._place_wx, self._place_wy, self._pick_wz)
+            self._set_mcs_target(self._place_wx, self._place_wy, self._place_wz)
             if self._is_at_target():
                 self._next_auto_state()
             elif self._auto_tick >= _AUTO_TIMEOUT:
@@ -340,11 +350,22 @@ class RobotController:
         elif self._auto_state == _A_LIFT_AFTER_PLACE:
             self._set_mcs_target(self._place_wx, self._place_wy, 0.0)
             if self._is_at_target():
-                self._auto_state = _A_IDLE
-                self._auto_tick  = 0
-                self._joint_mode = True
+                self._next_auto_state()  # → _A_GO_HOME
             elif self._auto_tick >= _AUTO_TIMEOUT:
                 self._trigger_auto_fault("Timeout: Anheben nach Ablage")
+
+        elif self._auto_state == _A_GO_HOME:
+            # Return arm to home position in joint mode after each placement
+            self._joint_mode = True
+            self.robot_trafo.acsAxis1.Sollposition = SCARA_HOME["acsAxis1"]
+            self.robot_trafo.acsAxis2.Sollposition = SCARA_HOME["acsAxis2"]
+            self.robot_trafo.acsAxis3.Sollposition = SCARA_HOME["acsAxis3"]
+            self.robot_trafo.acsAxis4.Sollposition = SCARA_HOME["acsAxis4"]
+            if self._is_at_target():
+                self._auto_state = _A_IDLE
+                self._auto_tick  = 0
+            elif self._auto_tick >= _AUTO_TIMEOUT:
+                self._trigger_auto_fault("Timeout: Heimfahrt")
 
     def _auto_try_start(self):
         """Poll pickup and place zones; start sequence only when both conditions are met."""
@@ -371,7 +392,7 @@ class RobotController:
         if pick_z is None and self.wpm is not None:
             part = self.wpm.pick_nearest(pw_x, pw_y, _SUCTION_RADIUS)
             if part is not None:
-                pick_z = 0.0
+                pick_z = self._world_z_to_mcs(_WPM_PART_TOP)  # suction contacts part top surface
                 pending = part
 
         if pick_z is None:
@@ -388,6 +409,7 @@ class RobotController:
         self._pick_wz   = pick_z
         self._place_wx  = pl_x - vp[0]
         self._place_wy  = pl_y - vp[1]
+        self._place_wz  = self._world_z_to_mcs(_WPM_PART_TOP)  # lower until suction contacts part top
         self._pending_wpm_part = pending
 
         self._auto_state = _A_MOVE_ABOVE_PICK
@@ -499,11 +521,20 @@ class RobotController:
         return dx, dy, dz, dr
 
     def _update_hmi_state(self):
-        self.hmi_state.axisJ1Position = self.robot_trafo.acsAxis1.ActualPosition
-        self.hmi_state.axisJ2Position = self.robot_trafo.acsAxis2.ActualPosition
-        self.hmi_state.axisJ3Position = self.robot_trafo.acsAxis3.ActualPosition
-        self.hmi_state.axisJ4Position = self.robot_trafo.acsAxis4.ActualPosition
-        self.hmi_state.axisXPosition  = self.robot_trafo.mcsAxisX.ActualPosition
-        self.hmi_state.axisYPosition  = self.robot_trafo.mcsAxisY.ActualPosition
-        self.hmi_state.axisZPosition  = self.robot_trafo.mcsAxisZ.ActualPosition
-        self.hmi_state.axisRPosition  = self.robot_trafo.mcsAxisR.ActualPosition
+        a1_act = self.robot_trafo.acsAxis1.ActualPosition
+        a2_act = self.robot_trafo.acsAxis2.ActualPosition
+        a3_act = self.robot_trafo.acsAxis3.ActualPosition
+        a4_act = self.robot_trafo.acsAxis4.ActualPosition
+        self.hmi_state.axisJ1Position = a1_act
+        self.hmi_state.axisJ2Position = a2_act
+        self.hmi_state.axisJ3Position = a3_act
+        self.hmi_state.axisJ4Position = a4_act
+        # Compute actual Cartesian from ACS actual positions (not Sollposition-derived)
+        r1 = math.radians(a1_act)
+        r2 = math.radians(a2_act)
+        L1 = self.robot_trafo.L1
+        L2 = self.robot_trafo.L2
+        self.hmi_state.axisXPosition = L1 * math.cos(r1) + L2 * math.cos(r1 + r2)
+        self.hmi_state.axisYPosition = L1 * math.sin(r1) + L2 * math.sin(r1 + r2)
+        self.hmi_state.axisZPosition = a3_act
+        self.hmi_state.axisRPosition = a1_act + a2_act + a4_act
