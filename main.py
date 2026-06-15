@@ -105,7 +105,7 @@ class Machine:
         # Robot 3 repositioned to (400, 300, 0) so it can reach H-Bot at (0,0)
         self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-150,  250, 0), rotation_z=180.0)
         self.cncView     = HBotView( pl=self.sharedPlotter, position=(    0,    0, 150))
-        self.scaraView3  = ScaraView(pl=self.sharedPlotter, position=(900 ,  170, 0), rotation_z=180.0)
+        self.scaraView3  = ScaraView(pl=self.sharedPlotter, position=(900 ,  170, 0), rotation_z=180.0, base_rotation_z=0.0)
         self.magazinView = MagazinViewPV(pl=self.sharedPlotter, position=(-300, -325, 0))
 
         self.sharedPlotter.show_axes()

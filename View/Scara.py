@@ -28,10 +28,11 @@ class Scara:
         position (tuple): Verschiebung des ganzen Roboters, z.B. (0, 800, 0)
     """
 
-    def __init__(self, data_folder_path=None, pl=None, position=(0, 0, 0), rotation_z=0.0):
+    def __init__(self, data_folder_path=None, pl=None, position=(0, 0, 0),
+                 rotation_z=0.0, base_rotation_z=None):
         """
-        Initialisiert den SCARA-Roboter.
-        rotation_z: zusätzliche Montagedrehung um Z-Achse in Grad (z.B. 180 = um 180° gedreht).
+        rotation_z      : kinematische Montagedrehung (Arbeitsbereich + Arm-Visualisierung).
+        base_rotation_z : rein visuelle Drehung des Basis-Gehäuses; wenn None wird rotation_z verwendet.
         """
 
         # --------------------------------------------------------
@@ -39,6 +40,8 @@ class Scara:
         # --------------------------------------------------------
         self.position = position
         self.rotation_z = rotation_z
+        # Separate visual rotation for the static base housing (defaults to rotation_z)
+        self._base_rotation_z = base_rotation_z if base_rotation_z is not None else rotation_z
 
         # --------------------------------------------------------
         # 2. Pfade konfigurieren
@@ -82,11 +85,11 @@ class Scara:
             self.pl = pl
 
         # --------------------------------------------------------
-        # 6. Montagedrehung auf statische Basis-Mesh anwenden
+        # 6. Visuelle Drehung des Basis-Gehäuses (unabhängig von Kinematik)
         # --------------------------------------------------------
-        if abs(rotation_z) > 0.01:
+        if abs(self._base_rotation_z) > 0.01:
             rx, ry, rz = self.position
-            base_mesh.rotate_z(rotation_z, point=(rx, ry, rz), inplace=True)
+            base_mesh.rotate_z(self._base_rotation_z, point=(rx, ry, rz), inplace=True)
 
         # --------------------------------------------------------
         # 7. Meshes in die Szene einfügen
