@@ -103,10 +103,10 @@ class Machine:
         self.sharedPlotter = pv.Plotter()
 
         # Robot 3 repositioned to (400, 300, 0) so it can reach H-Bot at (0,0)
-        self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-400,  100, 0))
-        self.cncView     = HBotView( pl=self.sharedPlotter, position=(    0,    0, 0))
-        self.scaraView3  = ScaraView(pl=self.sharedPlotter, position=( 400,  300, 0))
-        self.magazinView = MagazinViewPV(pl=self.sharedPlotter, position=(-400, -350, 0))
+        self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-300,  250, 0))
+        self.cncView     = HBotView( pl=self.sharedPlotter, position=(    0,    0, 150))
+        self.scaraView3  = ScaraView(pl=self.sharedPlotter, position=(850 ,  170, 0))
+        self.magazinView = MagazinViewPV(pl=self.sharedPlotter, position=(-300, -325, 0))
 
         self.sharedPlotter.show_axes()
         self.sharedPlotter.camera_position = [
