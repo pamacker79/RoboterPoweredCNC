@@ -40,7 +40,7 @@ from ViewModel.hmiState       import hmiState
 from ViewModel.RobotController import RobotController
 
 # ── World-coordinate landmarks ────────────────────────────────────────────────
-_HBOT_WORLD       = (0.0,   0.0)    # H-Bot work-surface centre
+_HBOT_WORLD       = (381.0, 195.0)  # H-Bot work-surface centre (Weltkoordinaten)
 _DEPOSIT_WORLD    = (700.0, 300.0)  # Robot 3 deposit position (to the right)
 _MAG_PICKUP_WORLD = (-300.0, -325.0)  # Magazine centre (matches MagazinViewPV position)
 
@@ -64,9 +64,9 @@ class Machine:
         self.CncTrafo = hBot()
         self.wpm = WorkpieceManager()
 
-        # H-Bot Startposition (Arm an Oberkante)
-        _HBOT_START_X = 0.0
-        _HBOT_START_Y = 200.0   # ← hier Oberkante-Y eintragen
+        # H-Bot Startposition (Arm an Werkzeugposition)
+        _HBOT_START_X = _HBOT_WORLD[0]
+        _HBOT_START_Y = _HBOT_WORLD[1]
         self.hbotX = _HBOT_START_X
         self.hbotY = _HBOT_START_Y
         self.CncTrafo.mcsAxisX.Sollposition  = _HBOT_START_X
@@ -77,8 +77,17 @@ class Machine:
         # H-Bot auto state
         self._hb_state = _HB_IDLE
         self._hb_tick  = 0
+        # Gravurmuster: Quadrat mit 50 mm Radius um Werkzeugposition (_HBOT_WORLD)
+        cx, cy = _HBOT_WORLD
+        r = 50.0
         self._hb_engrave_moves = [
-            (0.0,  0.0), (10.0 ,  10.0), (20.0,  10.0), (30.0,  20.0),(0.0,    0.0),
+            (cx,     cy    ),  # Mitte (Bauteil-Zentrum)
+            (cx,     cy + r),  # Nord
+            (cx + r, cy + r),  # Nord-Ost
+            (cx + r, cy - r),  # Süd-Ost
+            (cx - r, cy - r),  # Süd-West
+            (cx - r, cy + r),  # Nord-West
+            (cx,     cy    ),  # zurück zur Mitte
         ]
         self._hb_move_idx = 0
         self.hbot_at_home = True   # Robot 3 checks this before picking

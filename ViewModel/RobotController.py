@@ -575,12 +575,15 @@ class RobotController:
         self.hmi_state.axisJ2Position = a2_act
         self.hmi_state.axisJ3Position = a3_act
         self.hmi_state.axisJ4Position = a4_act
-        # Compute actual Cartesian from ACS actual positions (not Sollposition-derived)
+        # Compute TCP world position from ACS actual positions via FK + world transform
         r1 = math.radians(a1_act)
         r2 = math.radians(a2_act)
         L1 = self.robot_trafo.L1
         L2 = self.robot_trafo.L2
-        self.hmi_state.axisXPosition = L1 * math.cos(r1) + L2 * math.cos(r1 + r2)
-        self.hmi_state.axisYPosition = L1 * math.sin(r1) + L2 * math.sin(r1 + r2)
+        lx = L1 * math.cos(r1) + L2 * math.cos(r1 + r2)
+        ly = L1 * math.sin(r1) + L2 * math.sin(r1 + r2)
+        wx, wy = self._local_to_world(lx, ly)
+        self.hmi_state.axisXPosition = wx
+        self.hmi_state.axisYPosition = wy
         self.hmi_state.axisZPosition = a3_act
         self.hmi_state.axisRPosition = a1_act + a2_act + a4_act

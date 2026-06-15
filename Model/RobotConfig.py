@@ -22,10 +22,10 @@ SCARA_LIMITS = {
 }
 
 HBOT_LIMITS = {
-    "mcsAxisX":  (-300.0,  300.0),  # X-Achse            [mm]
+    "mcsAxisX":  (-700.0,  700.0),  # X-Achse            [mm]
     "mcsAxisY":  (-300.0,  300.0),  # Y-Achse            [mm]
-    "acsAxis_a": (-600.0,  600.0),  # Motor A            [mm]
-    "acsAxis_b": (-600.0,  600.0),  # Motor B            [mm]
+    "acsAxis_a": (-700.0,  700.0),  # Motor A = X+Y      [mm]
+    "acsAxis_b": (-700.0,  700.0),  # Motor B = X-Y      [mm]
 }
 
 SCARA_HOME = {
