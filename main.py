@@ -231,12 +231,16 @@ class Machine:
         self._hb_tick += 1
 
         if self._hb_state == _HB_IDLE:
-            # Wait until a workpiece is placed at the H-Bot centre
-            if self.wpm.has_part_at(_HBOT_WORLD[0], _HBOT_WORLD[1], radius=60.0):
+            # Wait until workpiece is placed AND Robot 1 has returned to home
+            part_ready   = self.wpm.has_part_at(_HBOT_WORLD[0], _HBOT_WORLD[1], radius=60.0)
+            robot1_clear = self.robot1_ctrl.is_idle
+            if part_ready and robot1_clear:
                 self._hb_state    = _HB_APPROACH
                 self._hb_tick     = 0
                 self.hbot_at_home = False
                 self.hmiCnc.setStatus("Fahre auf Werkstück...", "lightyellow")
+            elif part_ready and not robot1_clear:
+                self.hmiCnc.setStatus("Warte auf Roboter 1...", "lightsalmon")
 
         elif self._hb_state == _HB_APPROACH:
             # Move to workpiece centre, then start engraving
@@ -290,13 +294,10 @@ class Machine:
     # =========================================================================
     def _robot3_pickup_allowed(self):
         """
-        Robot 3 may only start its pickup sequence when:
-          - a part is at the H-Bot centre, AND
-          - the H-Bot has returned to home (hbot_at_home == True).
-        Inject this check by temporarily overriding the pickup_world so
-        _auto_try_start falls through when the guard is not satisfied.
+        Robot 3 may only start when the H-Bot is in _HB_DONE state —
+        meaning engraving is finished AND the head has returned to home.
         """
-        return self.hbot_at_home
+        return self._hb_state == _HB_DONE
 
 
 # =============================================================================

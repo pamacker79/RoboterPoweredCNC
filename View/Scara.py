@@ -204,9 +204,9 @@ class Scara:
         # Workpiece actor — hidden until suction is active
         # Das Dummy-Rohteil wird direkt unter den Sauger platziert
         part_mesh = pv.Box(bounds=(
-            tx - 40, tx + 40,
-            ty - 30, ty + 30,
-            tz - 45, tz - 25,
+            tx - 50, tx + 50,
+            ty - 25, ty + 25,
+            tz - 50, tz - 25,
         ))
         self._part_actor = self.pl.add_mesh(part_mesh, color="saddlebrown")
         self._part_actor.SetVisibility(False)

@@ -33,8 +33,8 @@ _ARRIVED_TOL_DEG = 1.5    # deg — arrival tolerance for angular axes
 _ARRIVED_TOL_MM  = 1.5    # mm  — arrival tolerance for linear axes
 _SUCTION_RADIUS    = 60.0   # mm — max XY distance for manual suction
 _SUCTION_RADIUS_Z  = 30.0   # mm — max Z distance for manual suction
-# WPM parts rest on the floor with top surface at this world Z (part height = 20 mm)
-_WPM_PART_TOP    = 20.0
+# WPM parts rest on the floor with top surface at this world Z (part height = 25 mm)
+_WPM_PART_TOP    = 25.0
 
 
 class RobotController:
@@ -89,6 +89,11 @@ class RobotController:
     # =========================================================================
     # PUBLIC — called from main loop
     # =========================================================================
+    @property
+    def is_idle(self) -> bool:
+        """True when the auto-sequence is complete and the robot is at home."""
+        return self._auto_state == _A_IDLE
+
     def update_hmi(self):
         hmi_ctrl = self.hmi.getHmiControl()
         is_auto  = (hmi_ctrl.OperationMode == 1)
@@ -245,7 +250,7 @@ class RobotController:
         if self.wpm is not None:
             part = self.wpm.pick_nearest(tcp_wx, tcp_wy, _SUCTION_RADIUS)
             if part is not None:
-                part_wz = _WPM_PART_TOP  # free parts on floor: top surface at Z = part height
+                part_wz = part["top_z"]  # actual top surface (accounts for stacking)
                 dist_z  = abs(tcp_wz - part_wz)
                 if dist_z <= _SUCTION_RADIUS_Z:
                     self.wpm.remove_part(part["id"])
@@ -394,7 +399,7 @@ class RobotController:
         if pick_z is None and self.wpm is not None:
             part = self.wpm.pick_nearest(pw_x, pw_y, _SUCTION_RADIUS)
             if part is not None:
-                pick_z = self._world_z_to_mcs(_WPM_PART_TOP)  # suction contacts part top surface
+                pick_z = self._world_z_to_mcs(part["top_z"])  # suction contacts actual top of stack
                 pending = part
 
         if pick_z is None:
@@ -412,7 +417,11 @@ class RobotController:
         self._pick_wz   = pick_z
         self._place_wx, self._place_wy = self._clamp_local_to_reach(
             *self._world_to_local(pl_x, pl_y))
-        self._place_wz  = self._world_z_to_mcs(_WPM_PART_TOP)  # lower until suction contacts part top
+        # Query stack height at the ACTUAL place position (after clamping).
+        # pl_x/pl_y may be outside reach; the clamped world position is where parts are stored.
+        actual_pl_wx, actual_pl_wy = self._local_to_world(self._place_wx, self._place_wy)
+        place_z_world   = self.wpm.get_place_z(actual_pl_wx, actual_pl_wy) if self.wpm else _WPM_PART_TOP
+        self._place_wz  = self._world_z_to_mcs(place_z_world)  # lower to top of current stack
         self._pending_wpm_part = pending
 
         self._auto_state = _A_MOVE_ABOVE_PICK
@@ -450,6 +459,10 @@ class RobotController:
         self.robot_trafo.mcsAxisX.Sollposition = local_x
         self.robot_trafo.mcsAxisY.Sollposition = local_y
         self.robot_trafo.mcsAxisZ.Sollposition = local_z
+        # Propagate Z directly to ACS so _is_at_target() sees the correct target
+        # immediately, before backward() runs in update_kinematics().
+        # Valid because mcsAxisZ = L3 + acsAxis3 and L3 is always 0.
+        self.robot_trafo.acsAxis3.Sollposition = local_z
 
     def _activate_vacuum(self):
         self._gripper_closed = True
