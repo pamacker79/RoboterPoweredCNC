@@ -1,6 +1,3 @@
-import os
-os.environ["TCL_LIBRARY"] = r"C:\Users\anco\AppData\Local\Programs\Python\Python313\tcl\tcl8.6"
-os.environ["TK_LIBRARY"]  = r"C:\Users\anco\AppData\Local\Programs\Python\Python313\tcl\tk8.6"
 import sys
 sys.path.append('./Model')
 sys.path.append('./ViewModel')
