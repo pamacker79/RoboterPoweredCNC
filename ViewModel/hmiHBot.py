@@ -1,9 +1,10 @@
 """
-Module: hmi (Hmi)
-Purpose: Tkinter HMI panel for one SCARA robot — jog controls, mode/coordinate selection,
-         override, status display, suction button.
-Inputs:  Button/slider events from operator; hmiState from RobotController via setHmiState().
-Outputs: hmiControl flags read by RobotController.
+Module: HmiHBot
+Purpose: Tkinter HMI panel specialized for the H-Bot engraving gantry.
+         Same design language as hmi.py — only X/Y axes, no coord selector,
+         no Saugen button; adds sequence step indicator.
+Inputs:  Operator button/slider events; sequence state from Machine via setSequenceState().
+Outputs: hmiControl flags read by Machine.update_hmi_hbot().
 Dependencies: tkinter, ViewModel.hmiControl, ViewModel.hmiState
 """
 
@@ -15,10 +16,10 @@ from tkinter import ttk
 from hmiControl import hmiControl
 from hmiState   import hmiState
 
-# ── Design-Tokens ─────────────────────────────────────────────────────────────
+# ── Design-Tokens (identisch zu hmi.py) ───────────────────────────────────────
 BG         = "lightblue"
-BG_SEC     = "#7fb3c8"      # Abschnitts-Header
-BG_MODEBAR = "#b8dce8"      # Modus-Streifen
+BG_SEC     = "#7fb3c8"
+BG_MODEBAR = "#b8dce8"
 FG_SEC     = "#1a3a4a"
 FONT_TITLE = ("Arial", 12, "bold")
 FONT_SEC   = ("Arial", 8,  "bold")
@@ -30,14 +31,33 @@ W, H       = 400, 415
 M          = 10
 CW         = W - 2 * M      # 380 px
 
+# ── Sequenz-Zustände (spiegelt main.py) ───────────────────────────────────────
+_HB_IDLE     = 0
+_HB_ENGRAVE  = 1
+_HB_RETURN   = 2
+_HB_DONE     = 3
+_HB_APPROACH = 4
+
+_STEP_ORDER = [_HB_IDLE, _HB_APPROACH, _HB_ENGRAVE, _HB_RETURN, _HB_DONE]
+_STEP_NAMES = ["Warten", "Anfahrt", "Gravur", "Park", "Fertig"]
+
+_CLR_OFF = "#cccccc"
+_CLR_ON  = {
+    _HB_IDLE:     "lightgreen",
+    _HB_APPROACH: "#f9e79f",
+    _HB_ENGRAVE:  "orange",
+    _HB_RETURN:   "#f9e79f",
+    _HB_DONE:     "lightcyan",
+}
+
 
 def _sec_header(parent, text, y):
     tk.Label(parent, text=f"  {text}", bg=BG_SEC, fg=FG_SEC,
              font=FONT_SEC, anchor="w").place(x=M, y=y, width=CW, height=18)
 
 
-class Hmi:
-    def __init__(self, parent, nameofHmi):
+class HmiHBot:
+    def __init__(self, parent, title="H-Bot (Gravur)"):
         self.root = tk.Frame(parent, bg=BG, width=W, height=H,
                              relief="ridge", borderwidth=2)
         self.root.pack(side="left", padx=5)
@@ -47,16 +67,6 @@ class Hmi:
         self.hmiState   = hmiState()
 
         # ── Events ────────────────────────────────────────────────────────────
-        def on_coord(event):
-            sel = self._cmb_coord.get()
-            self.hmiControl.CoordSystem = sel
-            jnt = (sel == "Joint")
-            self.LabelPos1.config(text="J1 :" if jnt else "X  :")
-            self.LabelPos2.config(text="J2 :" if jnt else "Y  :")
-            self.LabelPos3.config(text="Z  :")
-            self.LabelPos4.config(text="J4 :" if jnt else "R  :")
-            self._refresh_modebar()
-
         def on_mode(event):
             self.hmiControl.OperationMode = (
                 0 if self._cmb_mode.get() == "Hand" else 1)
@@ -69,28 +79,19 @@ class Hmi:
             self._refresh_modebar()
 
         # ── Titel ─────────────────────────────────────────────────────────────
-        tk.Label(self.root, text=nameofHmi, bg=BG,
+        tk.Label(self.root, text=title, bg=BG,
                  font=FONT_TITLE, anchor="center"
                  ).place(x=M, y=8, width=CW, height=26)
 
-        # ── Dropdowns: Betriebsart / Koordinaten ──────────────────────────────
+        # ── Betriebsart (ohne Koordinaten-Dropdown) ───────────────────────────
         tk.Label(self.root, text="Betriebsart:", bg=BG,
                  font=FONT_LBL).place(x=M, y=42)
         self._cmb_mode = ttk.Combobox(
             self.root, values=["Hand", "Automatisch"],
-            state="readonly", width=12)
+            state="readonly", width=14)
         self._cmb_mode.set("wählen")
         self._cmb_mode.bind("<<ComboboxSelected>>", on_mode)
         self._cmb_mode.place(x=M, y=58)
-
-        tk.Label(self.root, text="Koordinaten:", bg=BG,
-                 font=FONT_LBL).place(x=210, y=42)
-        self._cmb_coord = ttk.Combobox(
-            self.root, values=["Welt", "Joint", "Werkzeug"],
-            state="readonly", width=12)
-        self._cmb_coord.set("wählen")
-        self._cmb_coord.bind("<<ComboboxSelected>>", on_coord)
-        self._cmb_coord.place(x=210, y=58)
 
         # ── Modus-Streifen ────────────────────────────────────────────────────
         self._modebar = tk.Label(self.root, text="", bg=BG_MODEBAR,
@@ -98,16 +99,29 @@ class Hmi:
                                  anchor="center")
         self._modebar.place(x=M, y=82, width=CW, height=18)
 
-        # ── ACHSEN ────────────────────────────────────────────────────────────
+        # ── ACHSEN (nur X / Y) ────────────────────────────────────────────────
         _sec_header(self.root, "ACHSEN", 106)
-        self.LabelPos1, self._val_x = self._axis_row(
-            "X  :", 128, "MoveXPlus", "MoveXNeg")
-        self.LabelPos2, self._val_y = self._axis_row(
-            "Y  :", 154, "MoveYPlus", "MoveYNeg")
-        self.LabelPos3, self._val_z = self._axis_row(
-            "Z  :", 180, "MoveZPlus", "MoveZNeg")
-        self.LabelPos4, self._val_r = self._axis_row(
-            "R  :", 206, "MoveRPlus", "MoveRNeg")
+        self._val_x = self._axis_row("X  :", 128, "MoveXPlus", "MoveXNeg")
+        self._val_y = self._axis_row("Y  :", 154, "MoveYPlus", "MoveYNeg")
+
+        # ── SEQUENZ ───────────────────────────────────────────────────────────
+        _sec_header(self.root, "SEQUENZ", 182)
+
+        self._step_widgets = []
+        step_w  = 64
+        gap_w   = 12
+        x_pos   = M
+        for i, name in enumerate(_STEP_NAMES):
+            lbl = tk.Label(self.root, text=name,
+                           bg=_CLR_OFF, relief="groove",
+                           font=("Arial", 8, "bold"), anchor="center")
+            lbl.place(x=x_pos, y=204, width=step_w, height=26)
+            self._step_widgets.append(lbl)
+            x_pos += step_w
+            if i < len(_STEP_NAMES) - 1:
+                tk.Label(self.root, text="→", bg=BG,
+                         font=("Arial", 9)).place(x=x_pos + 1, y=207, width=gap_w - 2)
+                x_pos += gap_w
 
         # ── OVERRIDE ──────────────────────────────────────────────────────────
         _sec_header(self.root, "OVERRIDE", 236)
@@ -122,27 +136,22 @@ class Hmi:
 
         # ── STATUS ────────────────────────────────────────────────────────────
         _sec_header(self.root, "STATUS", 286)
-        self.status_label = tk.Label(
+        self._lbl_status = tk.Label(
             self.root, text="Bereit", bg="lightgreen",
             relief="sunken", font=FONT_STAT, anchor="center")
-        self.status_label.place(x=M, y=308, width=CW, height=34)
+        self._lbl_status.place(x=M, y=308, width=CW, height=34)
 
         # ── STEUERUNG ─────────────────────────────────────────────────────────
         _sec_header(self.root, "STEUERUNG", 350)
         tk.Button(self.root, text="Reset", width=9, font=FONT_BTN,
                   command=lambda: setattr(self.hmiControl, "Reset", True)
                   ).place(x=M, y=372)
-        self._saugen_btn = tk.Button(
-            self.root, text="Saugen", width=20, font=FONT_BTN, bg="#fffacd",
-            command=lambda: setattr(self.hmiControl, "Saugen", True))
-        self._saugen_btn.place(x=128, y=372)
 
         self._refresh_modebar()
 
     # ── Achszeile ─────────────────────────────────────────────────────────────
     def _axis_row(self, label, y, attr_p, attr_n):
-        name_lbl = tk.Label(self.root, text=label, bg=BG, font=FONT_LBL)
-        name_lbl.place(x=M, y=y)
+        tk.Label(self.root, text=label, bg=BG, font=FONT_LBL).place(x=M, y=y)
 
         bp = tk.Button(self.root, text="+", width=3, font=FONT_BTN)
         bp.place(x=70, y=y - 3)
@@ -156,19 +165,17 @@ class Hmi:
 
         val = tk.Label(self.root, text="0.0", bg=BG, font=FONT_VAL, anchor="e")
         val.place(x=290, y=y, width=100)
-        return name_lbl, val
+        return val
 
-    # ── Modus-Streifen aktualisieren ──────────────────────────────────────────
+    # ── Modus-Streifen ────────────────────────────────────────────────────────
     def _refresh_modebar(self):
-        mode  = self._cmb_mode.get()
-        coord = self._cmb_coord.get()
-        ov    = self.hmiControl.OverridePercent
-        mt    = mode  if mode  != "wählen" else "—"
-        ct    = coord if coord != "wählen" else "—"
-        ok    = mode != "wählen" and coord != "wählen"
-        bg    = ("#f9e79f" if ok and mode == "Automatisch" else
-                 "#d5f5e3" if ok else BG_MODEBAR)
-        self._modebar.config(text=f"{mt}  |  {ct}  |  Ov: {ov} %", bg=bg)
+        mode = self._cmb_mode.get()
+        ov   = self.hmiControl.OverridePercent
+        mt   = mode if mode != "wählen" else "—"
+        ok   = mode != "wählen"
+        bg   = ("#f9e79f" if ok and mode == "Automatisch" else
+                "#d5f5e3" if ok else BG_MODEBAR)
+        self._modebar.config(text=f"{mt}  |  Ov: {ov} %", bg=bg)
 
     # ── Öffentliche Schnittstelle ─────────────────────────────────────────────
     def getHmiControl(self):
@@ -176,41 +183,24 @@ class Hmi:
 
     def setHmiState(self, state: hmiState):
         self.hmiState = state
-        if self.hmiControl.CoordSystem == "Joint":
-            self._val_x.config(text=f"{state.axisJ1Position:8.1f}")
-            self._val_y.config(text=f"{state.axisJ2Position:8.1f}")
-            self._val_z.config(text=f"{state.axisJ3Position:8.1f}")
-            self._val_r.config(text=f"{state.axisJ4Position:8.1f}")
-        else:
-            self._val_x.config(text=f"{state.axisXPosition:8.1f}")
-            self._val_y.config(text=f"{state.axisYPosition:8.1f}")
-            self._val_z.config(text=f"{state.axisZPosition:8.1f}")
-            self._val_r.config(text=f"{state.axisRPosition:8.1f}")
+        self._val_x.config(text=f"{state.axisXPosition:8.1f}")
+        self._val_y.config(text=f"{state.axisYPosition:8.1f}")
 
     def setStatus(self, text: str, color: str = "lightgreen"):
-        self.status_label.config(text=text, bg=color)
+        self._lbl_status.config(text=text, bg=color)
 
     def set_saugen_enabled(self, enabled: bool):
-        self._saugen_btn.config(state="normal" if enabled else "disabled")
+        pass  # H-Bot hat keinen Sauger
 
-    # ── Kompatibilitäts-Stubs ─────────────────────────────────────────────────
-    def is_hand_mode(self): return self.hmiControl.OperationMode == 0
-    def x_plus(self, v):  self.hmiControl.MoveXPlus = v
-    def x_minus(self, v): self.hmiControl.MoveXNeg  = v
-    def y_plus(self, v):  self.hmiControl.MoveYPlus = v
-    def y_minus(self, v): self.hmiControl.MoveYNeg  = v
-    def z_plus(self, v):  self.hmiControl.MoveZPlus = v
-    def z_minus(self, v): self.hmiControl.MoveZNeg  = v
-    def r_plus(self, v):  self.hmiControl.MoveRPlus = v
-    def r_minus(self, v): self.hmiControl.MoveRNeg  = v
-
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    root.title("HMI Test")
-    root.geometry("1260x425")
-    for name in ["Roboter 1 SCARA", "H-Bot (Gravur)", "Roboter 3 SCARA"]:
-        f = tk.Frame(root)
-        f.pack(side="left", padx=5)
-        Hmi(f, name)
-    root.mainloop()
+    def setSequenceState(self, state: int,
+                         engrave_step: int = 0, engrave_total: int = 0):
+        for i, (step_state, widget) in enumerate(
+                zip(_STEP_ORDER, self._step_widgets)):
+            if step_state == state:
+                color = _CLR_ON.get(state, "#f9e79f")
+                name  = _STEP_NAMES[i]
+                if state == _HB_ENGRAVE and engrave_total > 0:
+                    name = f"Gravur\n{engrave_step}/{engrave_total}"
+                widget.config(bg=color, text=name)
+            else:
+                widget.config(bg=_CLR_OFF, text=_STEP_NAMES[i])

@@ -38,6 +38,7 @@ from View.MagazinViewPV import MagazinViewPV
 from Model.RobotConfig        import SCARA_HOME
 
 from ViewModel.hmi            import Hmi
+from ViewModel.hmiHBot        import HmiHBot
 from ViewModel.hmiState       import hmiState
 from ViewModel.RobotController import RobotController
 
@@ -117,7 +118,7 @@ class Machine:
         self.frame3.pack(side="left", padx=5)
 
         self.hmiRobot1 = Hmi(self.frame1, "Roboter 1 SCARA")
-        self.hmiCnc    = Hmi(self.frame2, "H-Bot (Gravur)")
+        self.hmiCnc    = HmiHBot(self.frame2, "H-Bot (Gravur)")
         self.hmiRobot3 = Hmi(self.frame3, "Roboter 3 SCARA")
 
         self.hmi1State   = hmiState()
@@ -143,6 +144,7 @@ class Machine:
 
         # ── Robot controllers ─────────────────────────────────────────────────
         # Robot 1: picks from magazine, places at H-Bot centre
+        # pickup_gate: only start when Robot 3 is at home (collision prevention)
         self.robot1_ctrl = RobotController(
             robot_trafo   = self.robot1Trafo,
             robot_view    = self.scaraView1,
@@ -152,6 +154,7 @@ class Machine:
             magazin_view  = self.magazinView,
             pickup_world  = _MAG_PICKUP_WORLD,
             place_world   = _HBOT_WORLD,
+            pickup_gate   = self._robot1_pickup_allowed,
             cnc_control   = self.robot1CncControl,
             cnc_program_path = "Model\\programm.nc",
         )
@@ -280,6 +283,12 @@ class Machine:
                 self._hb_tick  = 0
                 self.hmiCnc.setStatus("Bereit", "lightgreen")
 
+        self.hmiCnc.setSequenceState(
+            self._hb_state,
+            engrave_step  = self._hb_move_idx,
+            engrave_total = len(self._hb_engrave_moves),
+        )
+
     # =========================================================================
     # 3D VIEW UPDATE
     # =========================================================================
@@ -290,8 +299,15 @@ class Machine:
             pass
 
     # =========================================================================
-    # ROBOT 3 HANDSHAKE GUARD
+    # HANDSHAKE GUARDS
     # =========================================================================
+    def _robot1_pickup_allowed(self):
+        """
+        Robot 1 may only start when Robot 3 is idle (at home position).
+        Prevents collisions when both robots operate at different overrides.
+        """
+        return self.robot3_ctrl.is_idle
+
     def _robot3_pickup_allowed(self):
         """
         Robot 3 may only start when the H-Bot is in _HB_DONE state —
