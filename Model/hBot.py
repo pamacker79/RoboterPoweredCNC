@@ -81,6 +81,13 @@ class hBot:
         return self.forward(motor_a, motor_b)
 
     # --------------------------------
+    # Cyclic motion update (call every 100 Hz tick)
+    # --------------------------------
+    def cyclic(self, override: float = 1.0):
+        self.mcsAxisX.cyclic(override)
+        self.mcsAxisY.cyclic(override)
+
+    # --------------------------------
     # Status output
     # --------------------------------
     def status(self):

@@ -55,7 +55,6 @@ _HB_ENGRAVE   = 1   # simulated engraving moves
 _HB_RETURN    = 2   # return head to parking position
 _HB_DONE      = 3   # ready for Robot 3 pickup
 
-_HB_TICKS_PER_MOVE = 40   # ticks for each simulated engraving move
 
 
 class Machine:
@@ -206,11 +205,12 @@ class Machine:
     def update_hmi_hbot(self):
         hmi_ctrl = self.hmiCnc.getHmiControl()
         is_auto  = (hmi_ctrl.OperationMode == 1)
+        override = hmi_ctrl.OverridePercent / 100.0
 
         if is_auto:
             self._update_hbot_auto()
         else:
-            # Manual jogging
+            # Manual jogging — Sollposition sets target, cyclic applies ramp
             if hmi_ctrl.MoveXPlus:
                 self.CncTrafo.mcsAxisX.Sollposition += 5
             if hmi_ctrl.MoveXNeg:
@@ -220,8 +220,12 @@ class Machine:
             if hmi_ctrl.MoveYNeg:
                 self.CncTrafo.mcsAxisY.Sollposition -= 5
 
-        self.hbotX = self.CncTrafo.mcsAxisX.Sollposition
-        self.hbotY = self.CncTrafo.mcsAxisY.Sollposition
+        # Motion ramp — moves ActualPosition toward Sollposition at override-scaled speed
+        self.CncTrafo.cyclic(override)
+
+        # View and HMI always follow ActualPosition (smooth interpolation)
+        self.hbotX = self.CncTrafo.mcsAxisX.ActualPosition
+        self.hbotY = self.CncTrafo.mcsAxisY.ActualPosition
 
         self.hmiCncState.axisXPosition = self.hbotX
         self.hmiCncState.axisYPosition = self.hbotY
@@ -229,55 +233,66 @@ class Machine:
         self.hmiCncState.axisRPosition = 0.0
         self.hmiCnc.setHmiState(self.hmiCncState)
 
+    def _hbot_at_target(self, tol: float = 1.0) -> bool:
+        """True when ActualPosition has reached Sollposition within tolerance."""
+        return (
+            abs(self.CncTrafo.mcsAxisX.ActualPosition
+                - self.CncTrafo.mcsAxisX.Sollposition) <= tol
+            and
+            abs(self.CncTrafo.mcsAxisY.ActualPosition
+                - self.CncTrafo.mcsAxisY.Sollposition) <= tol
+        )
+
     def _update_hbot_auto(self):
-        """H-Bot automatic engraving sequence."""
+        """H-Bot automatic engraving sequence — arrival-based state transitions."""
         self._hb_tick += 1
 
         if self._hb_state == _HB_IDLE:
-            # Wait until workpiece is placed AND Robot 1 has returned to home
             part_ready   = self.wpm.has_part_at(_HBOT_WORLD[0], _HBOT_WORLD[1], radius=60.0)
             robot1_clear = self.robot1_ctrl.is_idle
             if part_ready and robot1_clear:
+                # Set approach target once on state entry
+                self.CncTrafo.mcsAxisX.Sollposition = _HBOT_ENGRAVE_CENTER[0]
+                self.CncTrafo.mcsAxisY.Sollposition = _HBOT_ENGRAVE_CENTER[1]
                 self._hb_state    = _HB_APPROACH
                 self._hb_tick     = 0
                 self.hbot_at_home = False
                 self.hmiCnc.setStatus("Fahre auf Werkstück...", "lightyellow")
-            elif part_ready and not robot1_clear:
+            elif part_ready:
                 self.hmiCnc.setStatus("Warte auf Roboter 1...", "lightsalmon")
 
         elif self._hb_state == _HB_APPROACH:
-            # Move to workpiece centre, then start engraving
-            self.CncTrafo.mcsAxisX.Sollposition = _HBOT_ENGRAVE_CENTER[0]
-            self.CncTrafo.mcsAxisY.Sollposition = _HBOT_ENGRAVE_CENTER[1]
-            if self._hb_tick >= _HB_TICKS_PER_MOVE:
+            # Transition when head has physically arrived at the engraving centre
+            if self._hbot_at_target():
                 self._hb_state    = _HB_ENGRAVE
                 self._hb_tick     = 0
                 self._hb_move_idx = 0
                 self.hmiCnc.setStatus("Gravur läuft...", "lightyellow")
 
         elif self._hb_state == _HB_ENGRAVE:
-            # Step through simulated engraving waypoints
-            if self._hb_tick >= _HB_TICKS_PER_MOVE:
-                self._hb_tick = 0
-                if self._hb_move_idx < len(self._hb_engrave_moves):
-                    tx, ty = self._hb_engrave_moves[self._hb_move_idx]
-                    self.CncTrafo.mcsAxisX.Sollposition = tx
-                    self.CncTrafo.mcsAxisY.Sollposition = ty
+            if self._hb_move_idx < len(self._hb_engrave_moves):
+                # Hold current waypoint as Sollposition every tick
+                tx, ty = self._hb_engrave_moves[self._hb_move_idx]
+                self.CncTrafo.mcsAxisX.Sollposition = tx
+                self.CncTrafo.mcsAxisY.Sollposition = ty
+                # Advance to next waypoint only after physical arrival
+                if self._hbot_at_target():
                     self._hb_move_idx += 1
-                else:
-                    self._hb_state = _HB_RETURN
+            else:
+                # All waypoints done — set return target and transition
+                self.CncTrafo.mcsAxisX.Sollposition = 300
+                self.CncTrafo.mcsAxisY.Sollposition = 100
+                self._hb_state = _HB_RETURN
+                self._hb_tick  = 0
 
         elif self._hb_state == _HB_RETURN:
-            self.CncTrafo.mcsAxisX.Sollposition = 300
-            self.CncTrafo.mcsAxisY.Sollposition = 100   
-            if self._hb_tick >= _HB_TICKS_PER_MOVE:
+            if self._hbot_at_target():
                 self._hb_state    = _HB_DONE
                 self._hb_tick     = 0
                 self.hbot_at_home = True
                 self.hmiCnc.setStatus("Gravur fertig — warte auf Roboter 3", "lightcyan")
 
         elif self._hb_state == _HB_DONE:
-            # Wait until Robot 3 has picked the part (part no longer at H-Bot centre)
             if not self.wpm.has_part_at(_HBOT_WORLD[0], _HBOT_WORLD[1], radius=60.0):
                 self._hb_state = _HB_IDLE
                 self._hb_tick  = 0

@@ -22,10 +22,11 @@ SCARA_LIMITS = {
 }
 
 HBOT_LIMITS = {
-    "mcsAxisX":  (-700.0,  700.0),  # X-Achse            [mm]
-    "mcsAxisY":  (-300.0,  300.0),  # Y-Achse            [mm]
-    "acsAxis_a": (-700.0,  700.0),  # Motor A = X+Y      [mm]
-    "acsAxis_b": (-700.0,  700.0),  # Motor B = X-Y      [mm]
+    # velocity at 100 Hz: 5 mm/tick = 500 mm/s maximum
+    "mcsAxisX":  (-700.0,  700.0, 5.0),  # X-Achse            [mm]
+    "mcsAxisY":  (-300.0,  300.0, 5.0),  # Y-Achse            [mm]
+    "acsAxis_a": (-700.0,  700.0),       # Motor A = X+Y      [mm]
+    "acsAxis_b": (-700.0,  700.0),       # Motor B = X-Y      [mm]
 }
 
 SCARA_HOME = {
