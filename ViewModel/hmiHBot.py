@@ -1,7 +1,7 @@
 """
 Module: HmiHBot
 Purpose: Tkinter HMI panel specialized for the H-Bot engraving gantry.
-         Same design language as hmi.py — only X/Y axes, no coord selector,
+         Same design language and height as hmi.py — only X/Y axes, no coord selector,
          no Saugen button; adds sequence step indicator.
 Inputs:  Operator button/slider events; sequence state from Machine via setSequenceState().
 Outputs: hmiControl flags read by Machine.update_hmi_hbot().
@@ -27,22 +27,22 @@ FONT_LBL   = ("Arial", 9)
 FONT_VAL   = ("Arial", 9,  "bold")
 FONT_STAT  = ("Arial", 10, "bold")
 FONT_BTN   = ("Arial", 9)
-W, H       = 400, 415
+W, H       = 400, 465
 M          = 10
 CW         = W - 2 * M      # 380 px
 
-# ── Sequenz-Zustände (spiegelt main.py) ───────────────────────────────────────
+_CLR_OFF   = "#cccccc"
+
+# ── H-Bot Sequenz-Zustände (spiegelt main.py) ─────────────────────────────────
 _HB_IDLE     = 0
 _HB_ENGRAVE  = 1
 _HB_RETURN   = 2
 _HB_DONE     = 3
 _HB_APPROACH = 4
 
-_STEP_ORDER = [_HB_IDLE, _HB_APPROACH, _HB_ENGRAVE, _HB_RETURN, _HB_DONE]
-_STEP_NAMES = ["Warten", "Anfahrt", "Gravur", "Park", "Fertig"]
-
-_CLR_OFF = "#cccccc"
-_CLR_ON  = {
+_STEP_ORDER  = [_HB_IDLE, _HB_APPROACH, _HB_ENGRAVE, _HB_RETURN, _HB_DONE]
+_STEP_NAMES  = ["Warten", "Anfahrt", "Gravur", "Park", "Fertig"]
+_STEP_COLORS = {
     _HB_IDLE:     "lightgreen",
     _HB_APPROACH: "#f9e79f",
     _HB_ENGRAVE:  "orange",
@@ -83,7 +83,7 @@ class HmiHBot:
                  font=FONT_TITLE, anchor="center"
                  ).place(x=M, y=8, width=CW, height=26)
 
-        # ── Betriebsart (ohne Koordinaten-Dropdown) ───────────────────────────
+        # ── Betriebsart ───────────────────────────────────────────────────────
         tk.Label(self.root, text="Betriebsart:", bg=BG,
                  font=FONT_LBL).place(x=M, y=42)
         self._cmb_mode = ttk.Combobox(
@@ -105,47 +105,48 @@ class HmiHBot:
         self._val_y = self._axis_row("Y  :", 154, "MoveYPlus", "MoveYNeg")
 
         # ── SEQUENZ ───────────────────────────────────────────────────────────
-        _sec_header(self.root, "SEQUENZ", 182)
+        _sec_header(self.root, "SEQUENZ", 186)
 
         self._step_widgets = []
-        step_w  = 64
-        gap_w   = 12
-        x_pos   = M
+        n      = len(_STEP_NAMES)
+        gap_w  = 10
+        step_w = (CW - (n - 1) * gap_w) // n   # = (380 - 40) // 5 = 68
+        x_pos  = M
         for i, name in enumerate(_STEP_NAMES):
             lbl = tk.Label(self.root, text=name,
                            bg=_CLR_OFF, relief="groove",
                            font=("Arial", 8, "bold"), anchor="center")
-            lbl.place(x=x_pos, y=204, width=step_w, height=26)
+            lbl.place(x=x_pos, y=208, width=step_w, height=26)
             self._step_widgets.append(lbl)
             x_pos += step_w
-            if i < len(_STEP_NAMES) - 1:
-                tk.Label(self.root, text="→", bg=BG,
-                         font=("Arial", 9)).place(x=x_pos + 1, y=207, width=gap_w - 2)
+            if i < n - 1:
+                tk.Label(self.root, text="›", bg=BG,
+                         font=("Arial", 9)).place(x=x_pos + 1, y=211, width=gap_w - 2)
                 x_pos += gap_w
 
         # ── OVERRIDE ──────────────────────────────────────────────────────────
-        _sec_header(self.root, "OVERRIDE", 236)
+        _sec_header(self.root, "OVERRIDE", 244)
         tk.Label(self.root, text="0 %", bg=BG,
-                 font=FONT_LBL).place(x=M, y=259)
+                 font=FONT_LBL).place(x=M, y=267)
         self._lbl_ov = tk.Label(self.root, text="100 %", bg=BG, font=FONT_VAL)
-        self._lbl_ov.place(x=336, y=259)
+        self._lbl_ov.place(x=336, y=267)
         ov = ttk.Scale(self.root, from_=0, to=100, orient="horizontal",
                        length=280, command=on_override)
         ov.set(100)
-        ov.place(x=34, y=260)
+        ov.place(x=34, y=268)
 
         # ── STATUS ────────────────────────────────────────────────────────────
-        _sec_header(self.root, "STATUS", 286)
+        _sec_header(self.root, "STATUS", 294)
         self._lbl_status = tk.Label(
             self.root, text="Bereit", bg="lightgreen",
             relief="sunken", font=FONT_STAT, anchor="center")
-        self._lbl_status.place(x=M, y=308, width=CW, height=34)
+        self._lbl_status.place(x=M, y=316, width=CW, height=34)
 
         # ── STEUERUNG ─────────────────────────────────────────────────────────
-        _sec_header(self.root, "STEUERUNG", 350)
+        _sec_header(self.root, "STEUERUNG", 358)
         tk.Button(self.root, text="Reset", width=9, font=FONT_BTN,
                   command=lambda: setattr(self.hmiControl, "Reset", True)
-                  ).place(x=M, y=372)
+                  ).place(x=M, y=380)
 
         self._refresh_modebar()
 
@@ -194,10 +195,10 @@ class HmiHBot:
 
     def setSequenceState(self, state: int,
                          engrave_step: int = 0, engrave_total: int = 0):
-        for i, (step_state, widget) in enumerate(
-                zip(_STEP_ORDER, self._step_widgets)):
+        """Hebt den aktiven Schritt im Sequenz-Indikator hervor."""
+        for i, (step_state, widget) in enumerate(zip(_STEP_ORDER, self._step_widgets)):
             if step_state == state:
-                color = _CLR_ON.get(state, "#f9e79f")
+                color = _STEP_COLORS.get(state, "#f9e79f")
                 name  = _STEP_NAMES[i]
                 if state == _HB_ENGRAVE and engrave_total > 0:
                     name = f"Gravur\n{engrave_step}/{engrave_total}"

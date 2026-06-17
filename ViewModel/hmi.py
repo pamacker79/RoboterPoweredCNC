@@ -1,7 +1,7 @@
 """
 Module: hmi (Hmi)
 Purpose: Tkinter HMI panel for one SCARA robot — jog controls, mode/coordinate selection,
-         override, status display, suction button.
+         override, sequence indicator, status display, suction button.
 Inputs:  Button/slider events from operator; hmiState from RobotController via setHmiState().
 Outputs: hmiControl flags read by RobotController.
 Dependencies: tkinter, ViewModel.hmiControl, ViewModel.hmiState
@@ -17,8 +17,8 @@ from hmiState   import hmiState
 
 # ── Design-Tokens ─────────────────────────────────────────────────────────────
 BG         = "lightblue"
-BG_SEC     = "#7fb3c8"      # Abschnitts-Header
-BG_MODEBAR = "#b8dce8"      # Modus-Streifen
+BG_SEC     = "#7fb3c8"
+BG_MODEBAR = "#b8dce8"
 FG_SEC     = "#1a3a4a"
 FONT_TITLE = ("Arial", 12, "bold")
 FONT_SEC   = ("Arial", 8,  "bold")
@@ -26,9 +26,22 @@ FONT_LBL   = ("Arial", 9)
 FONT_VAL   = ("Arial", 9,  "bold")
 FONT_STAT  = ("Arial", 10, "bold")
 FONT_BTN   = ("Arial", 9)
-W, H       = 400, 415
+W, H       = 400, 465
 M          = 10
 CW         = W - 2 * M      # 380 px
+
+_CLR_OFF   = "#cccccc"
+
+# ── SCARA sequence step groups ─────────────────────────────────────────────────
+# Each entry: (label, [auto-states that belong to this step], active-color)
+_SCARA_STEPS = [
+    ("Warten",    [0],       "lightgreen"),
+    ("Anfahrt",   [1],       "#f9e79f"),
+    ("Greifen",   [2, 3, 4], "orange"),
+    ("Transport", [5],       "#f9e79f"),
+    ("Ablegen",   [6, 7, 8], "orange"),
+    ("Heimfahrt", [9],       "lightcyan"),
+]
 
 
 def _sec_header(parent, text, y):
@@ -109,33 +122,53 @@ class Hmi:
         self.LabelPos4, self._val_r = self._axis_row(
             "R  :", 206, "MoveRPlus", "MoveRNeg")
 
+        # ── SEQUENZ ───────────────────────────────────────────────────────────
+        _sec_header(self.root, "SEQUENZ", 232)
+
+        self._seq_widgets = []
+        n      = len(_SCARA_STEPS)
+        gap_w  = 8
+        step_w = (CW - (n - 1) * gap_w) // n   # = (380 - 40) // 6 = 56
+        x_pos  = M
+        for i, (name, _, _clr) in enumerate(_SCARA_STEPS):
+            lbl = tk.Label(self.root, text=name,
+                           bg=_CLR_OFF, relief="groove",
+                           font=("Arial", 7, "bold"), anchor="center")
+            lbl.place(x=x_pos, y=254, width=step_w, height=24)
+            self._seq_widgets.append(lbl)
+            x_pos += step_w
+            if i < n - 1:
+                tk.Label(self.root, text="›", bg=BG,
+                         font=("Arial", 8)).place(x=x_pos + 1, y=257, width=gap_w - 2)
+                x_pos += gap_w
+
         # ── OVERRIDE ──────────────────────────────────────────────────────────
-        _sec_header(self.root, "OVERRIDE", 236)
+        _sec_header(self.root, "OVERRIDE", 286)
         tk.Label(self.root, text="0 %", bg=BG,
-                 font=FONT_LBL).place(x=M, y=259)
+                 font=FONT_LBL).place(x=M, y=309)
         self._lbl_ov = tk.Label(self.root, text="100 %", bg=BG, font=FONT_VAL)
-        self._lbl_ov.place(x=336, y=259)
+        self._lbl_ov.place(x=336, y=309)
         ov = ttk.Scale(self.root, from_=0, to=100, orient="horizontal",
                        length=280, command=on_override)
         ov.set(100)
-        ov.place(x=34, y=260)
+        ov.place(x=34, y=310)
 
         # ── STATUS ────────────────────────────────────────────────────────────
-        _sec_header(self.root, "STATUS", 286)
+        _sec_header(self.root, "STATUS", 336)
         self.status_label = tk.Label(
             self.root, text="Bereit", bg="lightgreen",
             relief="sunken", font=FONT_STAT, anchor="center")
-        self.status_label.place(x=M, y=308, width=CW, height=34)
+        self.status_label.place(x=M, y=358, width=CW, height=34)
 
         # ── STEUERUNG ─────────────────────────────────────────────────────────
-        _sec_header(self.root, "STEUERUNG", 350)
+        _sec_header(self.root, "STEUERUNG", 400)
         tk.Button(self.root, text="Reset", width=9, font=FONT_BTN,
                   command=lambda: setattr(self.hmiControl, "Reset", True)
-                  ).place(x=M, y=372)
+                  ).place(x=M, y=422)
         self._saugen_btn = tk.Button(
             self.root, text="Saugen", width=20, font=FONT_BTN, bg="#fffacd",
             command=lambda: setattr(self.hmiControl, "Saugen", True))
-        self._saugen_btn.place(x=128, y=372)
+        self._saugen_btn.place(x=128, y=422)
 
         self._refresh_modebar()
 
@@ -158,7 +191,7 @@ class Hmi:
         val.place(x=290, y=y, width=100)
         return name_lbl, val
 
-    # ── Modus-Streifen aktualisieren ──────────────────────────────────────────
+    # ── Modus-Streifen ────────────────────────────────────────────────────────
     def _refresh_modebar(self):
         mode  = self._cmb_mode.get()
         coord = self._cmb_coord.get()
@@ -187,6 +220,14 @@ class Hmi:
             self._val_z.config(text=f"{state.axisZPosition:8.1f}")
             self._val_r.config(text=f"{state.axisRPosition:8.1f}")
 
+    def setSequenceState(self, state: int):
+        """Hebt den aktiven Schritt im Sequenz-Indikator hervor."""
+        for widget, (name, states, color) in zip(self._seq_widgets, _SCARA_STEPS):
+            if state in states:
+                widget.config(bg=color, text=name)
+            else:
+                widget.config(bg=_CLR_OFF, text=name)
+
     def setStatus(self, text: str, color: str = "lightgreen"):
         self.status_label.config(text=text, bg=color)
 
@@ -208,7 +249,7 @@ class Hmi:
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("HMI Test")
-    root.geometry("1260x425")
+    root.geometry("1260x475")
     for name in ["Roboter 1 SCARA", "H-Bot (Gravur)", "Roboter 3 SCARA"]:
         f = tk.Frame(root)
         f.pack(side="left", padx=5)

@@ -107,7 +107,7 @@ class Machine:
         # ── HMI window ───────────────────────────────────────────────────────
         self.hmiRoot = tk.Tk()
         self.hmiRoot.title("3 Roboter")
-        self.hmiRoot.geometry("1250x450")
+        self.hmiRoot.geometry("1250x475")
         self.hmiRoot.protocol("WM_DELETE_WINDOW", self.close_program)
 
         self.frame1 = tk.Frame(self.hmiRoot)

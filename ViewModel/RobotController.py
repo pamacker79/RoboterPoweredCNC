@@ -146,6 +146,8 @@ class RobotController:
 
         self._update_hmi_state()
         self.hmi.setHmiState(self.hmi_state)
+        if hasattr(self.hmi, "setSequenceState"):
+            self.hmi.setSequenceState(self._auto_state)
 
     def update_kinematics(self):
         try:
