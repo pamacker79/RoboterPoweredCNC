@@ -186,6 +186,13 @@ class RobotController:
             self.robot_trafo.mcsAxisY.Sollposition = point["Y"]
             self.robot_trafo.mcsAxisZ.Sollposition = point["Z"]
 
+    def cyclic(self):
+        if self._manual_mode:
+            self.robot_trafo.cyclic(override=1.0)
+        else:
+            pct = getattr(self.hmi.getHmiControl(), "OverridePercent", 100)
+            self.robot_trafo.cyclic(override=pct / 100.0)
+
     def update_view(self):
         # Use ActualPosition so the 3D model shows where the robot physically IS,
         # not where it wants to be (Sollposition may be ahead of actual motion).

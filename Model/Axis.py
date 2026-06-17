@@ -46,15 +46,18 @@ class Axis:
     def getSetPosition(self):
         return self._sollposition
 
-    def cyclic(self):
+    def cyclic(self, override: float = 1.0):
         if self.velocity is None:
             self.ActualPosition = self._sollposition
         else:
+            effective_vel = self.velocity * max(0.0, min(1.0, override))
+            if effective_vel == 0.0:
+                return
             diff = self._sollposition - self.ActualPosition
-            if abs(diff) <= self.velocity:
+            if abs(diff) <= effective_vel:
                 self.ActualPosition = self._sollposition
             else:
-                self.ActualPosition += self.velocity if diff > 0 else -self.velocity
+                self.ActualPosition += effective_vel if diff > 0 else -effective_vel
 
 
 if __name__ == "__main__":

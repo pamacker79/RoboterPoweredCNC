@@ -99,13 +99,13 @@ class Scara:
         self.mcsAxisZ.Sollposition += dz
         self.mcsAxisR.Sollposition += dr
 
-    def cyclic(self):
-        self.acsAxis1.cyclic();
-        self.acsAxis2.cyclic();
-        self.acsAxis3.cyclic();
-        self.acsAxis4.cyclic();
-        self.mcsAxisX.cyclic();
-        self.mcsAxisY.cyclic();
-        self.mcsAxisZ.cyclic();
-        self.mcsAxisR.cyclic();
+    def cyclic(self, override: float = 1.0):
+        self.acsAxis1.cyclic(override)
+        self.acsAxis2.cyclic(override)
+        self.acsAxis3.cyclic(override)
+        self.acsAxis4.cyclic(override)
+        self.mcsAxisX.cyclic()
+        self.mcsAxisY.cyclic()
+        self.mcsAxisZ.cyclic()
+        self.mcsAxisR.cyclic()
 

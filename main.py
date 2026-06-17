@@ -314,7 +314,7 @@ if __name__ == "__main__":
             ctrl.update_hmi()
             ctrl.update_kinematics()
             ctrl.update_cnc_path()
-            ctrl.robot_trafo.cyclic()
+            ctrl.cyclic()
             ctrl.update_view()
 
         machine.update_views()
