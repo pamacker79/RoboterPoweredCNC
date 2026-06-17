@@ -46,8 +46,9 @@ _MAG_PICKUP_WORLD = (-300.0, -325.0)  # Magazine centre (matches MagazinViewPV p
 
 # ── H-Bot auto-sequence states ────────────────────────────────────────────────
 _HB_IDLE      = 0
+_HB_APPROACH  = 4   # move to workpiece centre before engraving
 _HB_ENGRAVE   = 1   # simulated engraving moves
-_HB_RETURN    = 2   # return head to (0, 0)
+_HB_RETURN    = 2   # return head to parking position
 _HB_DONE      = 3   # ready for Robot 3 pickup
 
 _HB_TICKS_PER_MOVE = 40   # ticks for each simulated engraving move
@@ -221,10 +222,19 @@ class Machine:
         if self._hb_state == _HB_IDLE:
             # Wait until a workpiece is placed at the H-Bot centre
             if self.wpm.has_part_at(_HBOT_WORLD[0], _HBOT_WORLD[1], radius=60.0):
+                self._hb_state    = _HB_APPROACH
+                self._hb_tick     = 0
+                self.hbot_at_home = False
+                self.hmiCnc.setStatus("Fahre auf Werkstück...", "lightyellow")
+
+        elif self._hb_state == _HB_APPROACH:
+            # Move to workpiece centre, then start engraving
+            self.CncTrafo.mcsAxisX.Sollposition = _HBOT_WORLD[0]
+            self.CncTrafo.mcsAxisY.Sollposition = _HBOT_WORLD[1]
+            if self._hb_tick >= _HB_TICKS_PER_MOVE:
                 self._hb_state    = _HB_ENGRAVE
                 self._hb_tick     = 0
                 self._hb_move_idx = 0
-                self.hbot_at_home = False
                 self.hmiCnc.setStatus("Gravur läuft...", "lightyellow")
 
         elif self._hb_state == _HB_ENGRAVE:
