@@ -41,7 +41,7 @@ from ViewModel.RobotController import RobotController
 
 # ── World-coordinate landmarks ────────────────────────────────────────────────
 _HBOT_WORLD       = (381.0, 195.0)  # H-Bot work-surface centre (Weltkoordinaten)
-_DEPOSIT_WORLD    = (700.0, 300.0)  # Robot 3 deposit position (to the right)
+_DEPOSIT_WORLD    = (900.0, 720.0)  # Robot 3 deposit position (to the right)
 _MAG_PICKUP_WORLD = (-300.0, -325.0)  # Magazine centre (matches MagazinViewPV position)
 
 # ── H-Bot auto-sequence states ────────────────────────────────────────────────
