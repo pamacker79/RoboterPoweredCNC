@@ -32,6 +32,25 @@ CW         = W - 2 * M      # 380 px
 
 _CLR_OFF   = "#cccccc"
 
+# ── Y-Raster (gleich wie hmiHBot.py) ──────────────────────────────────────────
+_Y_TITLE     = 8
+_Y_LBL       = 42
+_Y_COMBO     = 58
+_Y_MODEBAR   = 82
+_Y_ACHSEN    = 106
+_Y_AXIS1     = 128
+_Y_AXIS2     = 154
+_Y_AXIS3     = 180
+_Y_AXIS4     = 206
+_Y_SEQUENZ   = 232
+_Y_SEQ_BOXES = 254
+_Y_OVERRIDE  = 286
+_Y_OV_CTRL   = 309
+_Y_STATUS    = 336
+_Y_STAT_LBL  = 358
+_Y_STEUERUNG = 400
+_Y_BUTTONS   = 422
+
 # ── SCARA sequence step groups ─────────────────────────────────────────────────
 # Each entry: (label, [auto-states that belong to this step], active-color)
 _SCARA_STEPS = [
@@ -84,91 +103,92 @@ class Hmi:
         # ── Titel ─────────────────────────────────────────────────────────────
         tk.Label(self.root, text=nameofHmi, bg=BG,
                  font=FONT_TITLE, anchor="center"
-                 ).place(x=M, y=8, width=CW, height=26)
+                 ).place(x=M, y=_Y_TITLE, width=CW, height=26)
 
         # ── Dropdowns: Betriebsart / Koordinaten ──────────────────────────────
         tk.Label(self.root, text="Betriebsart:", bg=BG,
-                 font=FONT_LBL).place(x=M, y=42)
+                 font=FONT_LBL).place(x=M, y=_Y_LBL)
         self._cmb_mode = ttk.Combobox(
             self.root, values=["Hand", "Automatisch"],
             state="readonly", width=12)
         self._cmb_mode.set("wählen")
         self._cmb_mode.bind("<<ComboboxSelected>>", on_mode)
-        self._cmb_mode.place(x=M, y=58)
+        self._cmb_mode.place(x=M, y=_Y_COMBO)
 
         tk.Label(self.root, text="Koordinaten:", bg=BG,
-                 font=FONT_LBL).place(x=210, y=42)
+                 font=FONT_LBL).place(x=210, y=_Y_LBL)
         self._cmb_coord = ttk.Combobox(
             self.root, values=["Welt", "Joint", "Werkzeug"],
             state="readonly", width=12)
         self._cmb_coord.set("wählen")
         self._cmb_coord.bind("<<ComboboxSelected>>", on_coord)
-        self._cmb_coord.place(x=210, y=58)
+        self._cmb_coord.place(x=210, y=_Y_COMBO)
 
         # ── Modus-Streifen ────────────────────────────────────────────────────
         self._modebar = tk.Label(self.root, text="", bg=BG_MODEBAR,
                                  relief="sunken", font=("Arial", 8),
                                  anchor="center")
-        self._modebar.place(x=M, y=82, width=CW, height=18)
+        self._modebar.place(x=M, y=_Y_MODEBAR, width=CW, height=18)
 
         # ── ACHSEN ────────────────────────────────────────────────────────────
-        _sec_header(self.root, "ACHSEN", 106)
+        _sec_header(self.root, "ACHSEN", _Y_ACHSEN)
         self.LabelPos1, self._val_x = self._axis_row(
-            "X  :", 128, "MoveXPlus", "MoveXNeg")
+            "X  :", _Y_AXIS1, "MoveXPlus", "MoveXNeg")
         self.LabelPos2, self._val_y = self._axis_row(
-            "Y  :", 154, "MoveYPlus", "MoveYNeg")
+            "Y  :", _Y_AXIS2, "MoveYPlus", "MoveYNeg")
         self.LabelPos3, self._val_z = self._axis_row(
-            "Z  :", 180, "MoveZPlus", "MoveZNeg")
+            "Z  :", _Y_AXIS3, "MoveZPlus", "MoveZNeg")
         self.LabelPos4, self._val_r = self._axis_row(
-            "R  :", 206, "MoveRPlus", "MoveRNeg")
+            "R  :", _Y_AXIS4, "MoveRPlus", "MoveRNeg")
 
         # ── SEQUENZ ───────────────────────────────────────────────────────────
-        _sec_header(self.root, "SEQUENZ", 232)
+        _sec_header(self.root, "SEQUENZ", _Y_SEQUENZ)
 
         self._seq_widgets = []
         n      = len(_SCARA_STEPS)
         gap_w  = 8
-        step_w = (CW - (n - 1) * gap_w) // n   # = (380 - 40) // 6 = 56
+        step_w = (CW - (n - 1) * gap_w) // n   # (380 - 40) // 6 = 56
         x_pos  = M
         for i, (name, _, _clr) in enumerate(_SCARA_STEPS):
             lbl = tk.Label(self.root, text=name,
                            bg=_CLR_OFF, relief="groove",
                            font=("Arial", 7, "bold"), anchor="center")
-            lbl.place(x=x_pos, y=254, width=step_w, height=24)
+            lbl.place(x=x_pos, y=_Y_SEQ_BOXES, width=step_w, height=24)
             self._seq_widgets.append(lbl)
             x_pos += step_w
             if i < n - 1:
                 tk.Label(self.root, text="›", bg=BG,
-                         font=("Arial", 8)).place(x=x_pos + 1, y=257, width=gap_w - 2)
+                         font=("Arial", 8)).place(x=x_pos + 1, y=_Y_SEQ_BOXES + 3,
+                                                   width=gap_w - 2)
                 x_pos += gap_w
 
         # ── OVERRIDE ──────────────────────────────────────────────────────────
-        _sec_header(self.root, "OVERRIDE", 286)
+        _sec_header(self.root, "OVERRIDE", _Y_OVERRIDE)
         tk.Label(self.root, text="0 %", bg=BG,
-                 font=FONT_LBL).place(x=M, y=309)
+                 font=FONT_LBL).place(x=M, y=_Y_OV_CTRL)
         self._lbl_ov = tk.Label(self.root, text="100 %", bg=BG, font=FONT_VAL)
-        self._lbl_ov.place(x=336, y=309)
+        self._lbl_ov.place(x=336, y=_Y_OV_CTRL)
         ov = ttk.Scale(self.root, from_=0, to=100, orient="horizontal",
                        length=280, command=on_override)
         ov.set(100)
-        ov.place(x=34, y=310)
+        ov.place(x=34, y=_Y_OV_CTRL + 1)
 
         # ── STATUS ────────────────────────────────────────────────────────────
-        _sec_header(self.root, "STATUS", 336)
+        _sec_header(self.root, "STATUS", _Y_STATUS)
         self.status_label = tk.Label(
             self.root, text="Bereit", bg="lightgreen",
             relief="sunken", font=FONT_STAT, anchor="center")
-        self.status_label.place(x=M, y=358, width=CW, height=34)
+        self.status_label.place(x=M, y=_Y_STAT_LBL, width=CW, height=34)
 
         # ── STEUERUNG ─────────────────────────────────────────────────────────
-        _sec_header(self.root, "STEUERUNG", 400)
+        _sec_header(self.root, "STEUERUNG", _Y_STEUERUNG)
         tk.Button(self.root, text="Reset", width=9, font=FONT_BTN,
                   command=lambda: setattr(self.hmiControl, "Reset", True)
-                  ).place(x=M, y=422)
+                  ).place(x=M, y=_Y_BUTTONS)
         self._saugen_btn = tk.Button(
             self.root, text="Saugen", width=20, font=FONT_BTN, bg="#fffacd",
             command=lambda: setattr(self.hmiControl, "Saugen", True))
-        self._saugen_btn.place(x=128, y=422)
+        self._saugen_btn.place(x=128, y=_Y_BUTTONS)
 
         self._refresh_modebar()
 

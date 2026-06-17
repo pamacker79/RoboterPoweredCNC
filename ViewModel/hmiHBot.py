@@ -1,8 +1,8 @@
 """
 Module: HmiHBot
 Purpose: Tkinter HMI panel specialized for the H-Bot engraving gantry.
-         Same design language and height as hmi.py — only X/Y axes, no coord selector,
-         no Saugen button; adds sequence step indicator.
+         Identical section y-positions as hmi.py (SCARA) for visual alignment.
+         Only X/Y axes; no coord-system selector; no Saugen button.
 Inputs:  Operator button/slider events; sequence state from Machine via setSequenceState().
 Outputs: hmiControl flags read by Machine.update_hmi_hbot().
 Dependencies: tkinter, ViewModel.hmiControl, ViewModel.hmiState
@@ -50,6 +50,23 @@ _STEP_COLORS = {
     _HB_DONE:     "lightcyan",
 }
 
+# ── Y-Raster (gleich wie hmi.py) ──────────────────────────────────────────────
+_Y_TITLE     = 8
+_Y_LBL       = 42
+_Y_COMBO     = 58
+_Y_MODEBAR   = 82
+_Y_ACHSEN    = 106
+_Y_AXIS1     = 128
+_Y_AXIS2     = 154
+_Y_SEQUENZ   = 232   # = gleich wie SCARA (nach 4 Achszeilen)
+_Y_SEQ_BOXES = 254
+_Y_OVERRIDE  = 286
+_Y_OV_CTRL   = 309
+_Y_STATUS    = 336
+_Y_STAT_LBL  = 358
+_Y_STEUERUNG = 400
+_Y_BUTTONS   = 422
+
 
 def _sec_header(parent, text, y):
     tk.Label(parent, text=f"  {text}", bg=BG_SEC, fg=FG_SEC,
@@ -81,72 +98,74 @@ class HmiHBot:
         # ── Titel ─────────────────────────────────────────────────────────────
         tk.Label(self.root, text=title, bg=BG,
                  font=FONT_TITLE, anchor="center"
-                 ).place(x=M, y=8, width=CW, height=26)
+                 ).place(x=M, y=_Y_TITLE, width=CW, height=26)
 
         # ── Betriebsart ───────────────────────────────────────────────────────
         tk.Label(self.root, text="Betriebsart:", bg=BG,
-                 font=FONT_LBL).place(x=M, y=42)
+                 font=FONT_LBL).place(x=M, y=_Y_LBL)
         self._cmb_mode = ttk.Combobox(
             self.root, values=["Hand", "Automatisch"],
             state="readonly", width=14)
         self._cmb_mode.set("wählen")
         self._cmb_mode.bind("<<ComboboxSelected>>", on_mode)
-        self._cmb_mode.place(x=M, y=58)
+        self._cmb_mode.place(x=M, y=_Y_COMBO)
 
         # ── Modus-Streifen ────────────────────────────────────────────────────
         self._modebar = tk.Label(self.root, text="", bg=BG_MODEBAR,
                                  relief="sunken", font=("Arial", 8),
                                  anchor="center")
-        self._modebar.place(x=M, y=82, width=CW, height=18)
+        self._modebar.place(x=M, y=_Y_MODEBAR, width=CW, height=18)
 
-        # ── ACHSEN (nur X / Y) ────────────────────────────────────────────────
-        _sec_header(self.root, "ACHSEN", 106)
-        self._val_x = self._axis_row("X  :", 128, "MoveXPlus", "MoveXNeg")
-        self._val_y = self._axis_row("Y  :", 154, "MoveYPlus", "MoveYNeg")
+        # ── ACHSEN (X / Y — Z / R nicht vorhanden) ───────────────────────────
+        _sec_header(self.root, "ACHSEN  —  X / Y", _Y_ACHSEN)
+        self._val_x = self._axis_row("X  :", _Y_AXIS1, "MoveXPlus", "MoveXNeg")
+        self._val_y = self._axis_row("Y  :", _Y_AXIS2, "MoveYPlus", "MoveYNeg")
+        # y=180 und y=206 (Z/R) bleiben frei → sauberer Abstand zur SEQUENZ-Zeile
 
-        # ── SEQUENZ ───────────────────────────────────────────────────────────
-        _sec_header(self.root, "SEQUENZ", 186)
+        # ── SEQUENZ  (y=232 = identisch zu SCARA) ────────────────────────────
+        _sec_header(self.root, "SEQUENZ", _Y_SEQUENZ)
 
         self._step_widgets = []
         n      = len(_STEP_NAMES)
         gap_w  = 10
-        step_w = (CW - (n - 1) * gap_w) // n   # = (380 - 40) // 5 = 68
+        step_w = (CW - (n - 1) * gap_w) // n   # (380 - 40) // 5 = 68
         x_pos  = M
         for i, name in enumerate(_STEP_NAMES):
             lbl = tk.Label(self.root, text=name,
                            bg=_CLR_OFF, relief="groove",
                            font=("Arial", 8, "bold"), anchor="center")
-            lbl.place(x=x_pos, y=208, width=step_w, height=26)
+            lbl.place(x=x_pos, y=_Y_SEQ_BOXES, width=step_w, height=24)
             self._step_widgets.append(lbl)
             x_pos += step_w
             if i < n - 1:
                 tk.Label(self.root, text="›", bg=BG,
-                         font=("Arial", 9)).place(x=x_pos + 1, y=211, width=gap_w - 2)
+                         font=("Arial", 9)).place(x=x_pos + 1, y=_Y_SEQ_BOXES + 3,
+                                                   width=gap_w - 2)
                 x_pos += gap_w
 
-        # ── OVERRIDE ──────────────────────────────────────────────────────────
-        _sec_header(self.root, "OVERRIDE", 244)
+        # ── OVERRIDE  (y=286 = identisch zu SCARA) ───────────────────────────
+        _sec_header(self.root, "OVERRIDE", _Y_OVERRIDE)
         tk.Label(self.root, text="0 %", bg=BG,
-                 font=FONT_LBL).place(x=M, y=267)
+                 font=FONT_LBL).place(x=M, y=_Y_OV_CTRL)
         self._lbl_ov = tk.Label(self.root, text="100 %", bg=BG, font=FONT_VAL)
-        self._lbl_ov.place(x=336, y=267)
+        self._lbl_ov.place(x=336, y=_Y_OV_CTRL)
         ov = ttk.Scale(self.root, from_=0, to=100, orient="horizontal",
                        length=280, command=on_override)
         ov.set(100)
-        ov.place(x=34, y=268)
+        ov.place(x=34, y=_Y_OV_CTRL + 1)
 
-        # ── STATUS ────────────────────────────────────────────────────────────
-        _sec_header(self.root, "STATUS", 294)
+        # ── STATUS  (y=336 = identisch zu SCARA) ─────────────────────────────
+        _sec_header(self.root, "STATUS", _Y_STATUS)
         self._lbl_status = tk.Label(
             self.root, text="Bereit", bg="lightgreen",
             relief="sunken", font=FONT_STAT, anchor="center")
-        self._lbl_status.place(x=M, y=316, width=CW, height=34)
+        self._lbl_status.place(x=M, y=_Y_STAT_LBL, width=CW, height=34)
 
-        # ── STEUERUNG ─────────────────────────────────────────────────────────
-        _sec_header(self.root, "STEUERUNG", 358)
+        # ── STEUERUNG  (y=400 = identisch zu SCARA) ──────────────────────────
+        _sec_header(self.root, "STEUERUNG", _Y_STEUERUNG)
         tk.Button(self.root, text="Reset", width=9, font=FONT_BTN,
                   command=lambda: setattr(self.hmiControl, "Reset", True)
-                  ).place(x=M, y=380)
+                  ).place(x=M, y=_Y_BUTTONS)
 
         self._refresh_modebar()
 
@@ -168,7 +187,7 @@ class HmiHBot:
         val.place(x=290, y=y, width=100)
         return val
 
-    # ── Modus-Streifen ────────────────────────────────────────────────────────
+    # ── Modus-Streifen (gleiche 3-Felder-Struktur wie SCARA) ─────────────────
     def _refresh_modebar(self):
         mode = self._cmb_mode.get()
         ov   = self.hmiControl.OverridePercent
@@ -176,7 +195,7 @@ class HmiHBot:
         ok   = mode != "wählen"
         bg   = ("#f9e79f" if ok and mode == "Automatisch" else
                 "#d5f5e3" if ok else BG_MODEBAR)
-        self._modebar.config(text=f"{mt}  |  Ov: {ov} %", bg=bg)
+        self._modebar.config(text=f"{mt}  |  MCS X/Y  |  Ov: {ov} %", bg=bg)
 
     # ── Öffentliche Schnittstelle ─────────────────────────────────────────────
     def getHmiControl(self):
