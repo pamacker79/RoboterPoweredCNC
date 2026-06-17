@@ -35,14 +35,17 @@ from View.Scara        import Scara as ScaraView
 from View.HBot         import HBot  as HBotView
 from View.MagazinViewPV import MagazinViewPV
 
+from Model.RobotConfig        import SCARA_HOME
+
 from ViewModel.hmi            import Hmi
 from ViewModel.hmiState       import hmiState
 from ViewModel.RobotController import RobotController
 
 # ── World-coordinate landmarks ────────────────────────────────────────────────
-_HBOT_WORLD       = (381.0, 195.0)  # H-Bot work-surface centre (Weltkoordinaten)
-_DEPOSIT_WORLD    = (900.0, 720.0)  # Robot 3 deposit position (to the right)
-_MAG_PICKUP_WORLD = (-300.0, -325.0)  # Magazine centre (matches MagazinViewPV position)
+_HBOT_WORLD          = (381.0, 195.0)   # H-Bot work-surface centre (Weltkoordinaten)
+_HBOT_ENGRAVE_CENTER = (80.0, -155.0)  # H-Bot MCS coordinates for laser over workpiece
+_DEPOSIT_WORLD       = (900.0, -720.0)  # Robot 3 deposit position (to the right)
+_MAG_PICKUP_WORLD    = (-300.0, -325.0)  # Magazine centre (matches MagazinViewPV position)
 
 # ── H-Bot auto-sequence states ────────────────────────────────────────────────
 _HB_IDLE      = 0
@@ -61,6 +64,13 @@ class Machine:
         # ── Models ───────────────────────────────────────────────────────────
         self.robot1Trafo = Scara()
         self.robot3Trafo = Scara()
+
+        # Beide Roboter auf SCARA_HOME initialisieren (= Endposition der Sequenz)
+        for trafo in (self.robot1Trafo, self.robot3Trafo):
+            for attr, val in SCARA_HOME.items():
+                ax = getattr(trafo, attr)
+                ax.Sollposition   = val
+                ax.ActualPosition = val
         self.robot1CncControl = CncInterpreter()
         self.CncTrafo = hBot()
         self.wpm = WorkpieceManager()
@@ -78,8 +88,8 @@ class Machine:
         # H-Bot auto state
         self._hb_state = _HB_IDLE
         self._hb_tick  = 0
-        # Gravurmuster: Quadrat mit 50 mm Radius um Werkzeugposition (_HBOT_WORLD)
-        cx, cy = _HBOT_WORLD
+        # Gravurmuster: Quadrat mit 50 mm Radius um Lasermittelpunkt (_HBOT_ENGRAVE_CENTER)
+        cx, cy = _HBOT_ENGRAVE_CENTER
         r = 50.0
         self._hb_engrave_moves = [
             (cx,     cy    ),  # Mitte (Bauteil-Zentrum)
@@ -158,6 +168,7 @@ class Machine:
             pickup_world  = _HBOT_WORLD,
             place_world   = _DEPOSIT_WORLD,
             pickup_gate   = self._robot3_pickup_allowed,
+            place_is_sink = True,
         )
 
         self.scara_controllers = [self.robot1_ctrl, self.robot3_ctrl]
@@ -229,8 +240,8 @@ class Machine:
 
         elif self._hb_state == _HB_APPROACH:
             # Move to workpiece centre, then start engraving
-            self.CncTrafo.mcsAxisX.Sollposition = _HBOT_WORLD[0]
-            self.CncTrafo.mcsAxisY.Sollposition = _HBOT_WORLD[1]
+            self.CncTrafo.mcsAxisX.Sollposition = _HBOT_ENGRAVE_CENTER[0]
+            self.CncTrafo.mcsAxisY.Sollposition = _HBOT_ENGRAVE_CENTER[1]
             if self._hb_tick >= _HB_TICKS_PER_MOVE:
                 self._hb_state    = _HB_ENGRAVE
                 self._hb_tick     = 0

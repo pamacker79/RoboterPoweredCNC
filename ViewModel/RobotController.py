@@ -41,7 +41,7 @@ class RobotController:
     def __init__(self, robot_trafo, robot_view, hmi, hmi_state,
                  workpiece_manager=None, magazin_view=None,
                  pickup_world=None, place_world=None,
-                 pickup_gate=None,
+                 pickup_gate=None, place_is_sink=False,
                  cnc_control=None, cnc_program_path=None):
         """
         pickup_world : (wx, wy) world position the robot polls for a part (auto mode).
@@ -57,6 +57,7 @@ class RobotController:
         self.pickup_world  = pickup_world   # (wx, wy) or None
         self.place_world   = place_world    # (wx, wy) or None
         self.pickup_gate   = pickup_gate    # optional callable() -> bool extra condition
+        self.place_is_sink = place_is_sink  # True: deposit zone may hold unlimited parts
         self.cnc_control   = cnc_control
         self.cnc_program_path = cnc_program_path
 
@@ -375,10 +376,11 @@ class RobotController:
         pw_x, pw_y = self.pickup_world
         pl_x, pl_y = self.place_world
 
-        # ── Guard 1: place target must be free ───────────────────────────────
-        if self.wpm is not None and self.wpm.has_part_at(pl_x, pl_y, _SUCTION_RADIUS):
-            self.hmi.setStatus("Automatik — Absetzplatz belegt, warte...", "lightsalmon")
-            return
+        # ── Guard 1: place target must be free (skip for sink zones) ─────────
+        if not self.place_is_sink:
+            if self.wpm is not None and self.wpm.has_part_at(pl_x, pl_y, _SUCTION_RADIUS):
+                self.hmi.setStatus("Automatik — Absetzplatz belegt, warte...", "lightsalmon")
+                return
 
         # ── Guard 2: part must be available at pickup zone ───────────────────
         pick_z = None
