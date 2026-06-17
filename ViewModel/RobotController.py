@@ -41,8 +41,7 @@ class RobotController:
     def __init__(self, robot_trafo, robot_view, hmi, hmi_state,
                  workpiece_manager=None, magazin_view=None,
                  pickup_world=None, place_world=None,
-                 pickup_gate=None, place_is_sink=False,
-                 cnc_control=None, cnc_program_path=None):
+                 pickup_gate=None, place_is_sink=False):
         """
         pickup_world : (wx, wy) world position the robot polls for a part (auto mode).
         place_world  : (wx, wy) world position the robot drops the part (auto mode).
@@ -54,34 +53,29 @@ class RobotController:
         self.hmi_state     = hmi_state
         self.wpm           = workpiece_manager
         self.magazin_view  = magazin_view
-        self.pickup_world  = pickup_world   # (wx, wy) or None
-        self.place_world   = place_world    # (wx, wy) or None
-        self.pickup_gate   = pickup_gate    # optional callable() -> bool extra condition
-        self.place_is_sink = place_is_sink  # True: deposit zone may hold unlimited parts
-        self.cnc_control   = cnc_control
-        self.cnc_program_path = cnc_program_path
+        self.pickup_world  = pickup_world
+        self.place_world   = place_world
+        self.pickup_gate   = pickup_gate
+        self.place_is_sink = place_is_sink
 
         self._gripper_closed  = False
         self._joint_mode      = True
         self._manual_mode     = True
         self._fault           = False
-        self._override_tick   = 0
 
         # carried part tracking (manual mode)
-        self._carried_part_id = None   # wpm part id, or "magazine" sentinel
+        self._carried_part_id = None
 
         # auto-sequence state
         self._auto_state   = _A_IDLE
         self._auto_tick    = 0
         self._pick_wx      = 0.0
         self._pick_wy      = 0.0
-        self._pick_wz      = 0.0   # mcsAxisZ to reach pickup surface
+        self._pick_wz      = 0.0
         self._place_wx     = 0.0
         self._place_wy     = 0.0
-        self._place_wz     = 0.0   # mcsAxisZ to reach place surface
-        self._pending_wpm_part = None  # part dict reserved during approach
-
-        self._interpolated_path = None  # CNC path iterator (Robot 1 only)
+        self._place_wz     = 0.0
+        self._pending_wpm_part = None
 
         if hasattr(self.robot_view, "set_gripper"):
             self.robot_view.set_gripper(closed=False)
@@ -109,13 +103,17 @@ class RobotController:
             self.robot_trafo.acsAxis4.Sollposition = SCARA_HOME["acsAxis4"]
             hmi_ctrl.Reset = False
 
-        # ── Saugen button only active in manual mode ─────────────────────────
+        mode_ok = hmi_ctrl.mode_selected
+
+        # ── Saugen button: only active when mode chosen and in manual ─────────
         if hasattr(self.hmi, "set_saugen_enabled"):
-            self.hmi.set_saugen_enabled(not is_auto)
+            self.hmi.set_saugen_enabled(mode_ok and not is_auto)
 
         # ── Status display ────────────────────────────────────────────────────
         if self._fault:
             self.hmi.setStatus("STÖRUNG — Reset drücken", "red")
+        elif not mode_ok:
+            self.hmi.setStatus("Betriebsmodus wählen!", "orange")
         elif is_auto and self._auto_state != _A_IDLE:
             self.hmi.setStatus(f"Automatik — Schritt {self._auto_state}/9", "lightyellow")
         elif is_auto:
@@ -131,6 +129,14 @@ class RobotController:
             return
 
         # ── Dispatch by mode ─────────────────────────────────────────────────
+        if not mode_ok:
+            # No mode selected yet — show axis positions but don't move
+            self._update_hmi_state()
+            self.hmi.setHmiState(self.hmi_state)
+            if hasattr(self.hmi, "setSequenceState"):
+                self.hmi.setSequenceState(self._auto_state)
+            return
+
         if is_auto:
             self._manual_mode = False
             self._run_auto(hmi_ctrl)
@@ -166,27 +172,6 @@ class RobotController:
             ]:
                 axis.Sollposition = axis.ActualPosition
             self._fault = True
-
-    def update_cnc_path(self):
-        """CNC path execution (Robot 1 only, manual auto-mode via G-code — kept for compatibility)."""
-        if self.cnc_control is None or self._interpolated_path is None:
-            return
-        override = getattr(self.hmi.getHmiControl(), "OverridePercent", 100)
-        ticks_per_step = max(1, round(100 / max(1, override)))
-        self._override_tick += 1
-        if self._override_tick < ticks_per_step:
-            return
-        self._override_tick = 0
-        self.cnc_control.position = {
-            "X": self.robot_trafo.mcsAxisX.ActualPosition,
-            "Y": self.robot_trafo.mcsAxisY.ActualPosition,
-            "Z": self.robot_trafo.mcsAxisZ.ActualPosition,
-        }
-        point = next(self._interpolated_path, None)
-        if point is not None:
-            self.robot_trafo.mcsAxisX.Sollposition = point["X"]
-            self.robot_trafo.mcsAxisY.Sollposition = point["Y"]
-            self.robot_trafo.mcsAxisZ.Sollposition = point["Z"]
 
     def cyclic(self):
         if self._manual_mode:

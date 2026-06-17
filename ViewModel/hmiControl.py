@@ -21,19 +21,11 @@ class hmiControl:
         self.MoveRPlus = False
         self.MoveRNeg = False
 
-        self.MoveJ1Plus = False
-        self.MoveJ1Neg = False
-        self.MoveJ2Plus = False
-        self.MoveJ2Neg = False
-        self.MoveJ3Plus = False
-        self.MoveJ3Neg = False
-        self.MoveJ4Plus = False
-        self.MoveJ4Neg = False
-
-        self.Saugen = False   # toggle: pick up or release a workpiece
+        self.Saugen = False
         self.Reset = False
 
-        self.OperationMode = 0  # 0=Manual / 1=Automatic
-        self.CoordSystem = "wählen"
-        self.OverridePercent = 100  # 0–100 %, speed override for CNC execution
+        self.OperationMode  = 0       # 0=Manual / 1=Automatic
+        self.mode_selected  = False   # True once operator picks a mode from the combo
+        self.CoordSystem    = "wählen"
+        self.OverridePercent = 100    # 0–100 %
 

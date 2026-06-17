@@ -26,9 +26,8 @@ import time
 import tkinter as tk
 import pyvista as pv
 
-from Model.hBot            import hBot
-from Model.Scara           import Scara
-from Model.CncInterpreter  import CncInterpreter
+from Model.hBot             import hBot
+from Model.Scara            import Scara
 from Model.WorkpieceManager import WorkpieceManager
 
 from View.Scara        import Scara as ScaraView
@@ -71,7 +70,6 @@ class Machine:
                 ax = getattr(trafo, attr)
                 ax.Sollposition   = val
                 ax.ActualPosition = val
-        self.robot1CncControl = CncInterpreter()
         self.CncTrafo = hBot()
         self.wpm = WorkpieceManager()
 
@@ -154,8 +152,6 @@ class Machine:
             pickup_world  = _MAG_PICKUP_WORLD,
             place_world   = _HBOT_WORLD,
             pickup_gate   = self._robot1_pickup_allowed,
-            cnc_control   = self.robot1CncControl,
-            cnc_program_path = "Model\\programm.nc",
         )
 
         # Robot 3: picks from H-Bot centre, deposits to the right
@@ -207,7 +203,9 @@ class Machine:
         is_auto  = (hmi_ctrl.OperationMode == 1)
         override = hmi_ctrl.OverridePercent / 100.0
 
-        if is_auto:
+        if not hmi_ctrl.mode_selected:
+            self.hmiCnc.setStatus("Betriebsmodus wählen!", "orange")
+        elif is_auto:
             self._update_hbot_auto()
         else:
             # Manual jogging — Sollposition sets target, cyclic applies ramp
@@ -344,7 +342,6 @@ if __name__ == "__main__":
         for ctrl in machine.scara_controllers:
             ctrl.update_hmi()
             ctrl.update_kinematics()
-            ctrl.update_cnc_path()
             ctrl.cyclic()
             ctrl.update_view()
 

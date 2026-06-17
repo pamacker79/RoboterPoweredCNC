@@ -87,6 +87,7 @@ class HmiHBot:
         def on_mode(event):
             self.hmiControl.OperationMode = (
                 0 if self._cmb_mode.get() == "Hand" else 1)
+            self.hmiControl.mode_selected = True
             self._refresh_modebar()
 
         def on_override(val):
