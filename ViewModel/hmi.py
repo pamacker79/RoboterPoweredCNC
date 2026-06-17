@@ -1,10 +1,50 @@
 """
-Module: hmi (Hmi)
-Purpose: Tkinter HMI panel for one SCARA robot — jog controls, mode/coordinate selection,
-         override, sequence indicator, status display, suction button.
-Inputs:  Button/slider events from operator; hmiState from RobotController via setHmiState().
-Outputs: hmiControl flags read by RobotController.
-Dependencies: tkinter, ViewModel.hmiControl, ViewModel.hmiState
+Modul: ViewModel.hmi (Hmi)
+===========================
+Tkinter-HMI-Panel für einen SCARA-Roboter.
+
+Aufbau des Panels
+-----------------
+Das Panel ist 400 × 465 Pixel gross und gliedert sich von oben nach unten
+in folgende Sektionen (Y-Positionen aus dem gemeinsamen Y-Raster):
+
++--------+------------------------------------------------------------------+
+| Y=8    | Titel (Robotername)                                              |
+| Y=42   | Dropdowns: Betriebsart | Koordinatensystem                       |
+| Y=82   | Modus-Streifen (aktuelle Auswahl + Override)                     |
+| Y=106  | Sektion ACHSEN                                                   |
+| Y=128  | Achszeile X (oder J1 im Joint-Modus)                            |
+| Y=154  | Achszeile Y (oder J2)                                            |
+| Y=180  | Achszeile Z                                                      |
+| Y=206  | Achszeile R (oder J4)                                            |
+| Y=232  | Sektion SEQUENZ                                                  |
+| Y=254  | Sequenz-Indikatoren (6 farbige Schrittkästchen)                  |
+| Y=286  | Sektion OVERRIDE                                                 |
+| Y=309  | Override-Schieberegler + Prozentanzeige                         |
+| Y=336  | Sektion STATUS                                                   |
+| Y=358  | Status-Label                                                     |
+| Y=400  | Sektion STEUERUNG                                                |
+| Y=422  | Reset-Taste, Saugen-Taste                                        |
++--------+------------------------------------------------------------------+
+
+Datenfluss
+----------
+* Operator drückt Taste / bewegt Schieberegler → schreibt in ``hmiControl``
+* ``RobotController.update_hmi()`` liest aus ``hmiControl``
+* ``RobotController`` schreibt Istwerte in ``hmiState``
+* ``Hmi.setHmiState()`` zeigt ``hmiState`` an
+
+Y-Raster
+--------
+Alle Y-Konstanten (``_Y_TITLE`` bis ``_Y_BUTTONS``) sind identisch
+zu ``hmiHBot.py``, damit die drei nebeneinander stehenden Panels
+optisch ausgerichtet sind.
+
+Abhängigkeiten
+--------------
+* ``tkinter`` — GUI-Toolkit
+* ``ViewModel.hmiControl`` — Steuerbefehle
+* ``ViewModel.hmiState``   — Rückmeldeistwerte
 """
 
 import sys
@@ -16,23 +56,23 @@ from hmiControl import hmiControl
 from hmiState   import hmiState
 
 # ── Design-Tokens ─────────────────────────────────────────────────────────────
-BG         = "lightblue"
-BG_SEC     = "#7fb3c8"
-BG_MODEBAR = "#b8dce8"
-FG_SEC     = "#1a3a4a"
+BG         = "lightblue"     # Hintergrundfarbe des Panels
+BG_SEC     = "#7fb3c8"       # Sektionsköpfe (dunkleres Blau)
+BG_MODEBAR = "#b8dce8"       # Modus-Streifen (helles Blau, neutral)
+FG_SEC     = "#1a3a4a"       # Schriftfarbe Sektionsköpfe
 FONT_TITLE = ("Arial", 12, "bold")
-FONT_SEC   = ("Arial", 8,  "bold")
-FONT_LBL   = ("Arial", 9)
-FONT_VAL   = ("Arial", 9,  "bold")
+FONT_SEC   = ("Arial",  8, "bold")
+FONT_LBL   = ("Arial",  9)
+FONT_VAL   = ("Arial",  9, "bold")
 FONT_STAT  = ("Arial", 10, "bold")
-FONT_BTN   = ("Arial", 9)
-W, H       = 400, 465
-M          = 10
-CW         = W - 2 * M      # 380 px
+FONT_BTN   = ("Arial",  9)
+W, H       = 400, 465        # Panel-Grösse [px]
+M          = 10              # Rand-Offset [px]
+CW         = W - 2 * M      # Nutzbreite = 380 px
 
-_CLR_OFF   = "#cccccc"
+_CLR_OFF   = "#cccccc"       # Farbe inaktiver Sequenz-Kästchen
 
-# ── Y-Raster (gleich wie hmiHBot.py) ──────────────────────────────────────────
+# ── Y-Raster (identisch zu hmiHBot.py) ────────────────────────────────────────
 _Y_TITLE     = 8
 _Y_LBL       = 42
 _Y_COMBO     = 58
@@ -51,25 +91,54 @@ _Y_STAT_LBL  = 358
 _Y_STEUERUNG = 400
 _Y_BUTTONS   = 422
 
-# ── SCARA sequence step groups ─────────────────────────────────────────────────
-# Each entry: (label, [auto-states that belong to this step], active-color)
+# ── SCARA-Sequenzschritte ──────────────────────────────────────────────────────
+# Jeder Eintrag: (Bezeichnung, [Auto-Zustände die zu diesem Schritt gehören], Aktivfarbe)
+# Die Auto-Zustände entsprechen den _A_*-Konstanten aus RobotController.py.
 _SCARA_STEPS = [
-    ("Warten",    [0],       "lightgreen"),
-    ("Anfahrt",   [1],       "#f9e79f"),
-    ("Greifen",   [2, 3, 4], "orange"),
-    ("Transport", [5],       "#f9e79f"),
-    ("Ablegen",   [6, 7, 8], "orange"),
-    ("Heimfahrt", [9],       "lightcyan"),
+    ("Warten",    [0],       "lightgreen"),   # _A_IDLE
+    ("Anfahrt",   [1],       "#f9e79f"),      # _A_MOVE_ABOVE_PICK
+    ("Greifen",   [2, 3, 4], "orange"),       # _A_LOWER / _A_GRAB / _A_LIFT_AFTER_PICK
+    ("Transport", [5],       "#f9e79f"),      # _A_MOVE_ABOVE_PLACE
+    ("Ablegen",   [6, 7, 8], "orange"),       # _A_LOWER_PLACE / _A_RELEASE / _A_LIFT
+    ("Heimfahrt", [9],       "lightcyan"),    # _A_GO_HOME
 ]
 
 
-def _sec_header(parent, text, y):
+def _sec_header(parent, text: str, y: int):
+    """
+    Erzeugt einen farbigen Sektionskopf-Balken.
+
+    Parameter
+    ---------
+    parent : tk.Widget
+        Eltern-Widget (Panel-Frame).
+    text : str
+        Bezeichnung der Sektion (z. B. "ACHSEN").
+    y : int
+        Y-Startposition im Panel [px].
+    """
     tk.Label(parent, text=f"  {text}", bg=BG_SEC, fg=FG_SEC,
              font=FONT_SEC, anchor="w").place(x=M, y=y, width=CW, height=18)
 
 
 class Hmi:
-    def __init__(self, parent, nameofHmi):
+    """
+    Tkinter-HMI-Panel für einen SCARA-Roboter.
+
+    Wird in ``main.py`` einmal pro Roboter instanziert und in einen
+    ``tk.Frame`` eingebettet.  Kommuniziert ausschliesslich über die
+    DTOs ``hmiControl`` (Eingaben) und ``hmiState`` (Istwerte).
+
+    Parameter
+    ---------
+    parent : tk.Widget
+        Eltern-Frame (wird vom Hauptfenster bereitgestellt).
+    nameofHmi : str
+        Titel der Panel-Kopfzeile (z. B. "Roboter 1 SCARA").
+    """
+
+    def __init__(self, parent, nameofHmi: str):
+        """Baut das vollständige HMI-Panel auf."""
         self.root = tk.Frame(parent, bg=BG, width=W, height=H,
                              relief="ridge", borderwidth=2)
         self.root.pack(side="left", padx=5)
@@ -78,8 +147,10 @@ class Hmi:
         self.hmiControl = hmiControl()
         self.hmiState   = hmiState()
 
-        # ── Events ────────────────────────────────────────────────────────────
+        # ── Event-Handler ─────────────────────────────────────────────────────
+
         def on_coord(event):
+            """Koordinatensystem gewählt: Achsbeschriftungen und Modebar aktualisieren."""
             sel = self._cmb_coord.get()
             self.hmiControl.CoordSystem = sel
             jnt = (sel == "Joint")
@@ -90,12 +161,14 @@ class Hmi:
             self._refresh_modebar()
 
         def on_mode(event):
+            """Betriebsart gewählt: OperationMode und mode_selected setzen."""
             self.hmiControl.OperationMode = (
                 0 if self._cmb_mode.get() == "Hand" else 1)
-            self.hmiControl.mode_selected = True
+            self.hmiControl.mode_selected = True   # Erstauswahl freischalten
             self._refresh_modebar()
 
         def on_override(val):
+            """Override-Schieberegler: OverridePercent und Beschriftung aktualisieren."""
             pct = int(float(val))
             self.hmiControl.OverridePercent = pct
             self._lbl_ov.config(text=f"{pct} %")
@@ -106,7 +179,7 @@ class Hmi:
                  font=FONT_TITLE, anchor="center"
                  ).place(x=M, y=_Y_TITLE, width=CW, height=26)
 
-        # ── Dropdowns: Betriebsart / Koordinaten ──────────────────────────────
+        # ── Dropdowns: Betriebsart / Koordinatensystem ────────────────────────
         tk.Label(self.root, text="Betriebsart:", bg=BG,
                  font=FONT_LBL).place(x=M, y=_Y_LBL)
         self._cmb_mode = ttk.Combobox(
@@ -133,14 +206,10 @@ class Hmi:
 
         # ── ACHSEN ────────────────────────────────────────────────────────────
         _sec_header(self.root, "ACHSEN", _Y_ACHSEN)
-        self.LabelPos1, self._val_x = self._axis_row(
-            "X  :", _Y_AXIS1, "MoveXPlus", "MoveXNeg")
-        self.LabelPos2, self._val_y = self._axis_row(
-            "Y  :", _Y_AXIS2, "MoveYPlus", "MoveYNeg")
-        self.LabelPos3, self._val_z = self._axis_row(
-            "Z  :", _Y_AXIS3, "MoveZPlus", "MoveZNeg")
-        self.LabelPos4, self._val_r = self._axis_row(
-            "R  :", _Y_AXIS4, "MoveRPlus", "MoveRNeg")
+        self.LabelPos1, self._val_x = self._axis_row("X  :", _Y_AXIS1, "MoveXPlus", "MoveXNeg")
+        self.LabelPos2, self._val_y = self._axis_row("Y  :", _Y_AXIS2, "MoveYPlus", "MoveYNeg")
+        self.LabelPos3, self._val_z = self._axis_row("Z  :", _Y_AXIS3, "MoveZPlus", "MoveZNeg")
+        self.LabelPos4, self._val_r = self._axis_row("R  :", _Y_AXIS4, "MoveRPlus", "MoveRNeg")
 
         # ── SEQUENZ ───────────────────────────────────────────────────────────
         _sec_header(self.root, "SEQUENZ", _Y_SEQUENZ)
@@ -148,7 +217,7 @@ class Hmi:
         self._seq_widgets = []
         n      = len(_SCARA_STEPS)
         gap_w  = 8
-        step_w = (CW - (n - 1) * gap_w) // n   # (380 - 40) // 6 = 56
+        step_w = (CW - (n - 1) * gap_w) // n   # (380 - 40) // 6 = 56 px
         x_pos  = M
         for i, (name, _, _clr) in enumerate(_SCARA_STEPS):
             lbl = tk.Label(self.root, text=name,
@@ -193,8 +262,31 @@ class Hmi:
 
         self._refresh_modebar()
 
-    # ── Achszeile ─────────────────────────────────────────────────────────────
-    def _axis_row(self, label, y, attr_p, attr_n):
+    # ── Hilfsmethoden ─────────────────────────────────────────────────────────
+
+    def _axis_row(self, label: str, y: int, attr_p: str, attr_n: str):
+        """
+        Erzeugt eine Achszeile mit Beschriftung, +/−-Tasten und Positionsanzeige.
+
+        Die Jog-Tasten setzen das entsprechende Flag in ``hmiControl`` solange
+        sie gedrückt gehalten werden (``<Button-1>`` / ``<ButtonRelease-1>``).
+
+        Parameter
+        ---------
+        label : str
+            Achsbeschriftung (z. B. "X  :").
+        y : int
+            Y-Position im Panel [px].
+        attr_p : str
+            Attributname des Plus-Flags in hmiControl (z. B. "MoveXPlus").
+        attr_n : str
+            Attributname des Minus-Flags in hmiControl (z. B. "MoveXNeg").
+
+        Rückgabe
+        --------
+        tuple(tk.Label, tk.Label)
+            (Beschriftungs-Label, Wert-Label).
+        """
         name_lbl = tk.Label(self.root, text=label, bg=BG, font=FONT_LBL)
         name_lbl.place(x=M, y=y)
 
@@ -212,8 +304,11 @@ class Hmi:
         val.place(x=290, y=y, width=100)
         return name_lbl, val
 
-    # ── Modus-Streifen ────────────────────────────────────────────────────────
     def _refresh_modebar(self):
+        """
+        Aktualisiert den Modus-Streifen mit aktueller Betriebsart, Koordinatensystem
+        und Override-Prozentsatz.  Farbe wechselt je nach Auswahlstatus.
+        """
         mode  = self._cmb_mode.get()
         coord = self._cmb_coord.get()
         ov    = self.hmiControl.OverridePercent
@@ -225,10 +320,23 @@ class Hmi:
         self._modebar.config(text=f"{mt}  |  {ct}  |  Ov: {ov} %", bg=bg)
 
     # ── Öffentliche Schnittstelle ─────────────────────────────────────────────
-    def getHmiControl(self):
+
+    def getHmiControl(self) -> hmiControl:
+        """Gibt das hmiControl-Objekt zurück (wird vom RobotController gelesen)."""
         return self.hmiControl
 
     def setHmiState(self, state: hmiState):
+        """
+        Aktualisiert die Positionsanzeigen mit den neuen Istwerten.
+
+        Zeigt Gelenk- oder kartesische Istwerte je nach gewähltem
+        Koordinatensystem.
+
+        Parameter
+        ---------
+        state : hmiState
+            Aktuelles Zustands-DTO vom RobotController.
+        """
         self.hmiState = state
         if self.hmiControl.CoordSystem == "Joint":
             self._val_x.config(text=f"{state.axisJ1Position:8.1f}")
@@ -242,7 +350,18 @@ class Hmi:
             self._val_r.config(text=f"{state.axisRPosition:8.1f}")
 
     def setSequenceState(self, state: int):
-        """Hebt den aktiven Schritt im Sequenz-Indikator hervor."""
+        """
+        Hebt den aktiven Schritt im Sequenz-Indikator hervor.
+
+        Das zur Auto-Zustandsnummer passende Kästchen leuchtet farbig auf;
+        alle anderen werden grau.
+
+        Parameter
+        ---------
+        state : int
+            Aktueller Auto-Sequenz-Zustand aus ``RobotController``
+            (entspricht einem der ``_A_*``-Werte).
+        """
         for widget, (name, states, color) in zip(self._seq_widgets, _SCARA_STEPS):
             if state in states:
                 widget.config(bg=color, text=name)
@@ -250,12 +369,33 @@ class Hmi:
                 widget.config(bg=_CLR_OFF, text=name)
 
     def setStatus(self, text: str, color: str = "lightgreen"):
+        """
+        Setzt den Text und die Hintergrundfarbe des Status-Labels.
+
+        Parameter
+        ---------
+        text : str
+            Anzuzeigender Statustext.
+        color : str
+            Tkinter-Farbname oder Hex-Wert (z. B. "red", "#f9e79f").
+        """
         self.status_label.config(text=text, bg=color)
 
     def set_saugen_enabled(self, enabled: bool):
+        """
+        Aktiviert oder deaktiviert die Saugen-Taste.
+
+        Die Taste ist nur aktiv wenn eine Betriebsart gewählt ist UND
+        sich der Roboter im Handbetrieb befindet.
+
+        Parameter
+        ---------
+        enabled : bool
+            True = Taste aktiv, False = Taste gesperrt (grau).
+        """
         self._saugen_btn.config(state="normal" if enabled else "disabled")
 
-    # ── Kompatibilitäts-Stubs ─────────────────────────────────────────────────
+    # ── Kompatibilitäts-Stubs (Legacy-API) ────────────────────────────────────
     def is_hand_mode(self): return self.hmiControl.OperationMode == 0
     def x_plus(self, v):  self.hmiControl.MoveXPlus = v
     def x_minus(self, v): self.hmiControl.MoveXNeg  = v

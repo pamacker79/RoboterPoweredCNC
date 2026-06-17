@@ -1,52 +1,135 @@
 """
-Module: RobotController
-Purpose: Per-robot orchestration layer that bridges HMI input, kinematics, and 3D view.
-Responsibilities:
-  - Manual mode: jog control, suction-range check on "Saugen", part release to Z=0.
-  - Auto mode:   state-machine sequence (approach → lower → grab → lift → place → lift).
-  - Mode switch: auto-sequence aborts immediately on switch to manual.
-Inputs:  hmiControl flags, kinematics model (Scara), view (View.Scara), WorkpieceManager,
-         optional MagazinViewPV (Robot 1 only).
-Outputs: Updated axis positions, actor transforms, hmiState, HMI status display.
-Dependencies: ViewModel.hmiControl, ViewModel.hmiState, Model.Scara, View.Scara,
-              Model.RobotConfig, Model.WorkpieceManager
+Modul: ViewModel.RobotController
+==================================
+Orchestrierungsschicht für einen einzelnen SCARA-Roboter.
+
+Rolle im MVC-System
+--------------------
+Der RobotController verbindet HMI-Eingaben, kinematisches Modell und
+3D-Visualisierung.  Er wird einmal pro SCARA-Roboter instanziert und
+im 100-Hz-Hauptloop von ``main.py`` durch vier Methoden aufgerufen:
+
+1. ``update_hmi()``       — Liest hmiControl, setzt Status und Sequenzanzeige,
+                            ruft Handbetrieb oder Automatik auf.
+2. ``update_kinematics()`` — Ruft ``Scara.forward()`` oder ``backward()``
+                            auf, fängt Kinematik-Fehler ab.
+3. ``cyclic()``           — Ruft ``Scara.cyclic(override)`` auf, damit
+                            ActualPosition schrittweise zu Sollposition fährt.
+4. ``update_view()``      — Übergibt ACS-Istwerte an die View.
+
+Betriebsmodi
+------------
+**Handbetrieb** (OperationMode = 0):
+    Jog-Befehle (X/Y/Z/R ± in Joint, Welt oder Werkzeugkoordinaten)
+    werden direkt auf die Sollpositionen addiert.  Der "Saugen"-Taster
+    löst ``_handle_saugen()`` aus.
+
+**Automatikbetrieb** (OperationMode = 1):
+    Zustandsmaschine mit 10 Zuständen (_A_IDLE bis _A_GO_HOME).
+    Jeder Schritt wartet auf Ankunft (``_is_at_target()``) oder auf
+    einen Dwell-Timer (_GRAB_TICKS) bevor der nächste Zustand beginnt.
+
+Zustandsmaschine (Auto-Sequenz)
+---------------------------------
+_A_IDLE             (0) – Wartet auf Bauteil und freien Absetzplatz.
+_A_MOVE_ABOVE_PICK  (1) – Fährt über die Aufnahmeposition (Z=0).
+_A_LOWER_TO_PICK    (2) – Fährt auf Bauthöhe (Z = pick_wz).
+_A_GRAB             (3) – Aktiviert Vakuum; Dwell 100 ms.
+_A_LIFT_AFTER_PICK  (4) – Hebt Bauteil (Z=0).
+_A_MOVE_ABOVE_PLACE (5) – Fährt über die Ablagestelle (Z=0).
+_A_LOWER_TO_PLACE   (6) – Fährt auf Stapelkante (Z = place_wz).
+_A_RELEASE          (7) – Deaktiviert Vakuum; Dwell 100 ms; Bauteil anlegen.
+_A_LIFT_AFTER_PLACE (8) – Hebt Arm (Z=0).
+_A_GO_HOME          (9) – Fährt in SCARA-Heimatposition (Gelenkkoordinaten).
+
+Koordinatentransformation
+--------------------------
+Weltkoordinaten (wx, wy) und Roboter-lokale MCS-Koordinaten (lx, ly)
+werden mit ``_world_to_local()`` und ``_local_to_world()`` ineinander
+umgerechnet.  Dabei wird die Montagedrehung ``rotation_z`` der View
+berücksichtigt, damit der Arm aus jeder Montagerichtung korrekt
+arbeitet.
+
+Sicherheitsmechanismen
+-----------------------
+* ``_AUTO_TIMEOUT`` — fault wenn ein Bewegungszustand nicht innerhalb
+  von 6 s (600 Ticks) beendet wird.
+* ``pickup_gate``   — callable, das True zurückgibt wenn die externe
+  Vorbedingung erfüllt ist (z. B. H-Bot an Parkposition, anderer Roboter idle).
+* ``place_is_sink`` — True bei Ablagestelle ohne Rückmeldecheck
+  (Roboter 3 legt in einen Endstapel ab).
+
+Abhängigkeiten
+--------------
+* ``Model.Scara``          — Kinematisches Modell
+* ``Model.RobotConfig``    — SCARA_HOME-Position
+* ``Model.WorkpieceManager`` — Bauteilregistrierung
+* ``View.Scara``           — 3D-Visualisierung
+* ``ViewModel.hmiControl`` — Eingaben vom Bediener
+* ``ViewModel.hmiState``   — Istwert-Ausgabe ans HMI
 """
 
 import math
 from Model.RobotConfig import SCARA_HOME
 
-# ── Auto-sequence states ─────────────────────────────────────────────────────
-_A_IDLE             = 0
-_A_MOVE_ABOVE_PICK  = 1
-_A_LOWER_TO_PICK    = 2
-_A_GRAB             = 3
-_A_LIFT_AFTER_PICK  = 4
-_A_MOVE_ABOVE_PLACE = 5
-_A_LOWER_TO_PLACE   = 6
-_A_RELEASE          = 7
-_A_LIFT_AFTER_PLACE = 8
-_A_GO_HOME          = 9   # return to SCARA_HOME after each placement
+# ── Auto-Sequenz-Zustände ────────────────────────────────────────────────────
+_A_IDLE             = 0   # Wartet auf Bauteil
+_A_MOVE_ABOVE_PICK  = 1   # Fährt über Aufnahme (Z=0)
+_A_LOWER_TO_PICK    = 2   # Senkt auf Bauthöhe ab
+_A_GRAB             = 3   # Aktiviert Vakuum (Dwell)
+_A_LIFT_AFTER_PICK  = 4   # Hebt Bauteil an (Z=0)
+_A_MOVE_ABOVE_PLACE = 5   # Fährt über Ablagestelle (Z=0)
+_A_LOWER_TO_PLACE   = 6   # Senkt auf Stapelkante ab
+_A_RELEASE          = 7   # Deaktiviert Vakuum (Dwell), legt Teil ab
+_A_LIFT_AFTER_PLACE = 8   # Hebt Arm an (Z=0)
+_A_GO_HOME          = 9   # Heimfahrt in SCARA_HOME
 
-_GRAB_TICKS      = 10     # ticks for vacuum engage/release dwell (~100 ms)
-_AUTO_TIMEOUT    = 600    # ticks before a motion state triggers fault (~6 s)
-_ARRIVED_TOL_DEG = 1.5    # deg — arrival tolerance for angular axes
-_ARRIVED_TOL_MM  = 1.5    # mm  — arrival tolerance for linear axes
-_SUCTION_RADIUS    = 60.0   # mm — max XY distance for manual suction
-_SUCTION_RADIUS_Z  = 30.0   # mm — max Z distance for manual suction
-# WPM parts rest on the floor with top surface at this world Z (part height = 25 mm)
-_WPM_PART_TOP    = 25.0
+_GRAB_TICKS      = 10    # Ticks für Vakuum-Dwell (~100 ms bei 100 Hz)
+_AUTO_TIMEOUT    = 600   # Ticks vor Störungsauslösung (~6 s)
+_ARRIVED_TOL_DEG = 1.5   # Ankunftstoleranz Winkelachsen [Grad]
+_ARRIVED_TOL_MM  = 1.5   # Ankunftstoleranz Linearachsen [mm]
+_SUCTION_RADIUS  = 60.0  # Max. XY-Abstand für manuelle Saugnapfprüfung [mm]
+_SUCTION_RADIUS_Z = 30.0 # Max. Z-Abstand für manuelle Saugnapfprüfung [mm]
+_WPM_PART_TOP    = 25.0  # Standard-Bauteiloberkante im WPM (Teile liegen auf Z=0, Höhe=25 mm)
 
 
 class RobotController:
+    """
+    Orchestrierungsschicht für einen SCARA-Roboter.
+
+    Verbindet HMI-Eingaben (hmiControl), kinematisches Modell (Scara)
+    und 3D-Visualisierung (View.Scara).
+
+    Parameter
+    ---------
+    robot_trafo : Model.Scara
+        Kinematisches Modell des Roboters.
+    robot_view : View.Scara
+        3D-Visualisierung des Roboters.
+    hmi : Hmi
+        HMI-Panel des Roboters.
+    hmi_state : hmiState
+        Istwert-DTO für die HMI-Anzeige.
+    workpiece_manager : WorkpieceManager oder None
+        Globales Bauteilregister.
+    magazin_view : MagazinViewPV oder None
+        Magazin-View (nur für Roboter 1, der das Magazin bedient).
+    pickup_world : tuple(float, float) oder None
+        Weltkoordinaten der Aufnahmestelle (Auto-Modus).
+    place_world : tuple(float, float) oder None
+        Weltkoordinaten der Ablagestelle (Auto-Modus).
+    pickup_gate : callable oder None
+        Funktion, die True zurückgibt wenn der Start erlaubt ist
+        (z. B. anderer Roboter in Heimatposition).
+    place_is_sink : bool
+        True wenn die Ablagestelle ein Endlager ist (kein Belegtheits-Check).
+    """
+
     def __init__(self, robot_trafo, robot_view, hmi, hmi_state,
                  workpiece_manager=None, magazin_view=None,
                  pickup_world=None, place_world=None,
                  pickup_gate=None, place_is_sink=False):
-        """
-        pickup_world : (wx, wy) world position the robot polls for a part (auto mode).
-        place_world  : (wx, wy) world position the robot drops the part (auto mode).
-        magazin_view : MagazinViewPV — supply only for the robot that serves the magazine.
-        """
+        """Initialisiert den Controller mit allen Abhängigkeiten."""
         self.robot_trafo   = robot_trafo
         self.robot_view    = robot_view
         self.hmi           = hmi
@@ -59,42 +142,59 @@ class RobotController:
         self.place_is_sink = place_is_sink
 
         self._gripper_closed  = False
-        self._joint_mode      = True
+        self._joint_mode      = True   # True = Gelenkkoordinaten, False = kartesisch
         self._manual_mode     = True
         self._fault           = False
 
-        # carried part tracking (manual mode)
-        self._carried_part_id = None
+        self._carried_part_id = None   # ID des manuell getragenen Teils
 
-        # auto-sequence state
+        # Auto-Sequenz-Zustand
         self._auto_state   = _A_IDLE
         self._auto_tick    = 0
-        self._pick_wx      = 0.0
+        self._pick_wx      = 0.0   # Roboter-lokale Aufnahmekoordinaten
         self._pick_wy      = 0.0
         self._pick_wz      = 0.0
-        self._place_wx     = 0.0
+        self._place_wx     = 0.0   # Roboter-lokale Ablagekoordinaten
         self._place_wy     = 0.0
         self._place_wz     = 0.0
-        self._pending_wpm_part = None
+        self._pending_wpm_part = None  # WPM-Teile-Dict das für den Griff reserviert ist
 
         if hasattr(self.robot_view, "set_gripper"):
             self.robot_view.set_gripper(closed=False)
 
     # =========================================================================
-    # PUBLIC — called from main loop
+    # Öffentliche API — vom Hauptloop aufgerufen
     # =========================================================================
+
     @property
     def is_idle(self) -> bool:
-        """True when the auto-sequence is complete and the robot is at home."""
+        """
+        True wenn die Auto-Sequenz abgeschlossen ist und der Arm in SCARA_HOME steht.
+
+        Wird von anderen Controllern als Handshake-Guard genutzt
+        (z. B. H-Bot wartet auf Roboter 1).
+        """
         return self._auto_state == _A_IDLE
 
     def update_hmi(self):
+        """
+        Verarbeitet HMI-Eingaben, aktualisiert den Statusstreifen und
+        delegiert an Handbetrieb oder Automatik.
+
+        Ablauf:
+        1. Reset-Impuls prüfen (Fehler löschen, Arm in Home).
+        2. Saugen-Taste sperren/freigeben.
+        3. Status-Label setzen (Priorität: Fault > kein Modus > Automatik > Limit > Bereit).
+        4. Falls Modus noch nicht gewählt: Istwerte anzeigen und früh zurückkehren.
+        5. Handbetrieb oder Automatik aufrufen.
+        6. Istwerte und Sequenzanzeige aktualisieren.
+        """
         hmi_ctrl = self.hmi.getHmiControl()
         is_auto  = (hmi_ctrl.OperationMode == 1)
 
-        # ── Reset ────────────────────────────────────────────────────────────
+        # ── Reset-Impuls ──────────────────────────────────────────────────────
         if getattr(hmi_ctrl, "Reset", False):
-            self._fault = False
+            self._fault      = False
             self._auto_state = _A_IDLE
             self._cancel_vacuum()
             self.robot_trafo.acsAxis1.Sollposition = SCARA_HOME["acsAxis1"]
@@ -105,11 +205,11 @@ class RobotController:
 
         mode_ok = hmi_ctrl.mode_selected
 
-        # ── Saugen button: only active when mode chosen and in manual ─────────
+        # ── Saugen-Taste: nur aktiv wenn Modus gewählt und Handbetrieb ────────
         if hasattr(self.hmi, "set_saugen_enabled"):
             self.hmi.set_saugen_enabled(mode_ok and not is_auto)
 
-        # ── Status display ────────────────────────────────────────────────────
+        # ── Status-Anzeige (Prioritätsreihenfolge) ────────────────────────────
         if self._fault:
             self.hmi.setStatus("STÖRUNG — Reset drücken", "red")
         elif not mode_ok:
@@ -123,28 +223,29 @@ class RobotController:
         else:
             self.hmi.setStatus("Bereit", "lightgreen")
 
+        # Fault: nur Istwerte anzeigen, keine Steuerbefehle ausführen
         if self._fault:
             self._update_hmi_state()
             self.hmi.setHmiState(self.hmi_state)
             return
 
-        # ── Dispatch by mode ─────────────────────────────────────────────────
+        # Kein Modus gewählt: Istwerte anzeigen, keine Bewegung
         if not mode_ok:
-            # No mode selected yet — show axis positions but don't move
             self._update_hmi_state()
             self.hmi.setHmiState(self.hmi_state)
             if hasattr(self.hmi, "setSequenceState"):
                 self.hmi.setSequenceState(self._auto_state)
             return
 
+        # ── Betriebsart-Dispatch ──────────────────────────────────────────────
         if is_auto:
             self._manual_mode = False
             self._run_auto(hmi_ctrl)
         else:
-            # Switching to manual: abort auto sequence and release vacuum immediately
+            # Umschalten auf Handbetrieb: Sequenz abbrechen und Vakuum lösen
             if not self._manual_mode:
-                self._auto_state = _A_IDLE
-                self._auto_tick  = 0
+                self._auto_state  = _A_IDLE
+                self._auto_tick   = 0
                 self._cancel_vacuum()
                 self._pending_wpm_part = None
             self._manual_mode = True
@@ -156,6 +257,18 @@ class RobotController:
             self.hmi.setSequenceState(self._auto_state)
 
     def update_kinematics(self):
+        """
+        Aktualisiert das kinematische Modell (Vorwärts- oder Rückwärtskinematik).
+
+        Im Gelenkkoordinaten-Modus (``_joint_mode=True``) wird nur
+        ``forward()`` aufgerufen.  Im kartesischen Modus wird zuerst
+        ``backward()`` (IK) und danach ``forward()`` (FK) aufgerufen,
+        um ACS- und MCS-Werte konsistent zu halten.
+
+        Kinematik-Fehler (Arbeitsraum-Verletzung) werden abgefangen und
+        lösen eine Störung aus — die Sollpositionen werden auf die
+        Istwerte zurückgesetzt, damit kein weiterer Fehler entsteht.
+        """
         try:
             if self._joint_mode:
                 self.robot_trafo.forward()
@@ -174,6 +287,12 @@ class RobotController:
             self._fault = True
 
     def cyclic(self):
+        """
+        Führt alle ACS-Achsen schrittweise an ihre Sollpositionen heran.
+
+        Im Handbetrieb wird immer mit Override=100 % gefahren (volle Geschwindigkeit).
+        Im Automatikbetrieb wird der Override-Wert des HMI-Schiebereglers verwendet.
+        """
         if self._manual_mode:
             self.robot_trafo.cyclic(override=1.0)
         else:
@@ -181,9 +300,16 @@ class RobotController:
             self.robot_trafo.cyclic(override=pct / 100.0)
 
     def update_view(self):
-        # Use ActualPosition so the 3D model shows where the robot physically IS,
-        # not where it wants to be (Sollposition may be ahead of actual motion).
-        # +180° on axis1: STL arm points in -X at angle=0, kinematics assumes +X.
+        """
+        Übergibt die aktuellen ACS-Istwerte an die 3D-View.
+
+        Verwendet immer ``ActualPosition`` (wo der Roboter physisch steht),
+        nie ``Sollposition`` (wo er hinfahren soll).  Das stellt sicher,
+        dass die 3D-Animation die Bewegungsrampe widerspiegelt.
+
+        Der +180°-Offset auf acsAxis1 korrigiert die STL-Nullstellung:
+        der Arm zeigt im STL in -X, die Kinematik nimmt +X als Referenz.
+        """
         self.robot_view.update_joints(
             self.robot_trafo.acsAxis1.ActualPosition + 180.0,
             self.robot_trafo.acsAxis2.ActualPosition,
@@ -192,35 +318,56 @@ class RobotController:
         )
 
     # =========================================================================
-    # MANUAL MODE
+    # Handbetrieb
     # =========================================================================
+
     def _run_manual(self, hmi_ctrl):
+        """
+        Verarbeitet Jog-Eingaben und Saugen-Impuls im Handbetrieb.
+
+        Koordinatensystem-Prüfung: wenn noch kein KS gewählt ist,
+        wird der Status auf "Koordinatensystem wählen!" gesetzt und
+        die Jog-Verarbeitung übersprungen.
+        """
         coord_system = getattr(hmi_ctrl, "CoordSystem", "wählen")
-        coord_ok = coord_system in ["Joint", "Welt", "Werkzeug"]
+        coord_ok     = coord_system in ["Joint", "Welt", "Werkzeug"]
 
         if not coord_ok:
             self.hmi.setStatus("Koordinatensystem wählen!", "orange")
         else:
             self._joint_mode = self._handle_manual_control(hmi_ctrl)
 
-        # "Saugen" toggle — one-shot flag consumed here
+        # Saugen-Einmal-Impuls verarbeiten
         if getattr(hmi_ctrl, "Saugen", False):
             hmi_ctrl.Saugen = False
             self._handle_saugen()
 
     def _handle_saugen(self):
-        """Pick up or release a workpiece depending on current carry state."""
+        """
+        Schaltet Vakuum ein oder aus, abhängig vom aktuellen Trägezustand.
+
+        Wenn der Sauger bereits geschlossen ist, wird das Bauteil abgelegt.
+        Ansonsten wird versucht, das nächste Bauteil aufzunehmen.
+        """
         if self._gripper_closed:
-            # Release: drop part at (tcp_x, tcp_y, Z=0)
             self._release_part()
         else:
-            # Attempt pickup: check all parts in scene
             self._attempt_pickup()
 
     def _attempt_pickup(self):
+        """
+        Versucht, ein Bauteil mit dem Sauger aufzunehmen.
+
+        Suchpriorität:
+        1. Oberstes Teil im Magazin (nur wenn ``magazin_view`` gesetzt).
+        2. Nächstes freies Teil im WorkpieceManager.
+
+        Ein Aufnehmen ist nur möglich wenn der TCP innerhalb des
+        Suchradius (XY und Z) am Bauteil ist.
+        """
         tcp_wx, tcp_wy, tcp_wz = self._tcp_world_pos()
 
-        # ① Check magazine top part
+        # ① Magazin-Rohteil prüfen
         if self.magazin_view is not None:
             mag_coords = self.magazin_view.get_pickup_coordinates()
             if mag_coords is not None:
@@ -240,12 +387,11 @@ class RobotController:
                         )
                     return
 
-        # ② Check free parts in WorkpieceManager
+        # ② Freie Teile im WorkpieceManager prüfen
         if self.wpm is not None:
             part = self.wpm.pick_nearest(tcp_wx, tcp_wy, _SUCTION_RADIUS)
             if part is not None:
-                part_wz = part["top_z"]  # actual top surface (accounts for stacking)
-                dist_z  = abs(tcp_wz - part_wz)
+                dist_z = abs(tcp_wz - part["top_z"])
                 if dist_z <= _SUCTION_RADIUS_Z:
                     self.wpm.remove_part(part["id"])
                     self._activate_vacuum()
@@ -258,11 +404,17 @@ class RobotController:
                     )
                 return
 
-        # ③ Nothing within XY radius
+        # ③ Kein Teil in Reichweite
         self.hmi.setStatus("Kein Rohteil in der Nähe des Saugers", "orange")
 
     def _release_part(self):
-        """Drop carried part at TCP XY, Z=0, preserving current TCP rotation."""
+        """
+        Legt das getragene Bauteil an der aktuellen TCP-Position ab (Z=0).
+
+        Die Ablageposition ist immer auf dem Boden (Z=0); die aktuelle
+        TCP-Weltrotation wird auf das Teil übertragen, damit es in der
+        richtigen Ausrichtung liegt.
+        """
         if self.wpm is not None:
             tcp_wx, tcp_wy, _ = self._tcp_world_pos()
             self.wpm.add_part(
@@ -276,14 +428,22 @@ class RobotController:
         self.hmi.setStatus("Teil abgelegt (Z=0)", "lightgreen")
 
     # =========================================================================
-    # AUTO MODE
+    # Automatikbetrieb
     # =========================================================================
+
     def _run_auto(self, hmi_ctrl):
+        """
+        Führt die automatische Pick-and-Place-Sequenz aus (10 Zustände).
+
+        Wird jeden 100-Hz-Tick aufgerufen.  Jeder Bewegungszustand setzt
+        ein MCS-Ziel und wartet auf Ankunft.  Dwell-Zustände (_A_GRAB,
+        _A_RELEASE) zählen Ticks bis zum Ablauf.
+        """
         self._auto_tick += 1
 
         if self._auto_state == _A_IDLE:
             self._auto_try_start()
-            self._auto_tick = 0   # don't let tick counter grow unbounded while idle
+            self._auto_tick = 0   # Tick-Zähler in Ruhe nicht ansteigen lassen
 
         elif self._auto_state == _A_MOVE_ABOVE_PICK:
             self._set_mcs_target(self._pick_wx, self._pick_wy, 0.0)
@@ -300,7 +460,6 @@ class RobotController:
                 self._trigger_auto_fault("Timeout: Absenken zum Bauteil")
 
         elif self._auto_state == _A_GRAB:
-            # One-shot: activate vacuum and remove part from source on first tick
             if self._auto_tick == 1:
                 self._activate_vacuum()
                 if self._pending_wpm_part is not None:
@@ -336,7 +495,6 @@ class RobotController:
             if self._auto_tick == 1:
                 self._cancel_vacuum()
                 if self.wpm is not None:
-                    # Convert SCARA-local back to world (accounts for mounting rotation)
                     place_wx, place_wy = self._local_to_world(self._place_wx, self._place_wy)
                     self.wpm.add_part(
                         self.robot_view.pl,
@@ -350,12 +508,12 @@ class RobotController:
         elif self._auto_state == _A_LIFT_AFTER_PLACE:
             self._set_mcs_target(self._place_wx, self._place_wy, 0.0)
             if self._is_at_target():
-                self._next_auto_state()  # → _A_GO_HOME
+                self._next_auto_state()   # → _A_GO_HOME
             elif self._auto_tick >= _AUTO_TIMEOUT:
                 self._trigger_auto_fault("Timeout: Anheben nach Ablage")
 
         elif self._auto_state == _A_GO_HOME:
-            # Return arm to home position in joint mode after each placement
+            # Heimfahrt in Gelenkkoordinaten (sicher, keine IK-Singularität)
             self._joint_mode = True
             self.robot_trafo.acsAxis1.Sollposition = SCARA_HOME["acsAxis1"]
             self.robot_trafo.acsAxis2.Sollposition = SCARA_HOME["acsAxis2"]
@@ -368,21 +526,32 @@ class RobotController:
                 self._trigger_auto_fault("Timeout: Heimfahrt")
 
     def _auto_try_start(self):
-        """Poll pickup and place zones; start sequence only when both conditions are met."""
+        """
+        Prüft alle Startbedingungen und startet die Sequenz wenn erfüllt.
+
+        Bedingungen (in Reihenfolge):
+        1. Absetzplatz frei (ausser bei place_is_sink=True).
+        2. Bauteil an Aufnahmeposition vorhanden (Magazin oder WPM).
+        3. Externer Gate-Check (pickup_gate) liefert True.
+
+        Wenn alle Bedingungen erfüllt sind, werden Aufnahme- und
+        Ablagepositionen in lokale MCS-Koordinaten umgerechnet und der
+        Zustand auf _A_MOVE_ABOVE_PICK gesetzt.
+        """
         if self.pickup_world is None or self.place_world is None:
             return
 
         pw_x, pw_y = self.pickup_world
         pl_x, pl_y = self.place_world
 
-        # ── Guard 1: place target must be free (skip for sink zones) ─────────
+        # Bedingung 1: Absetzplatz prüfen
         if not self.place_is_sink:
             if self.wpm is not None and self.wpm.has_part_at(pl_x, pl_y, _SUCTION_RADIUS):
                 self.hmi.setStatus("Automatik — Absetzplatz belegt, warte...", "lightsalmon")
                 return
 
-        # ── Guard 2: part must be available at pickup zone ───────────────────
-        pick_z = None
+        # Bedingung 2: Bauteil an Aufnahmestelle vorhanden?
+        pick_z  = None
         pending = None
 
         if self.magazin_view is not None:
@@ -393,29 +562,27 @@ class RobotController:
         if pick_z is None and self.wpm is not None:
             part = self.wpm.pick_nearest(pw_x, pw_y, _SUCTION_RADIUS)
             if part is not None:
-                pick_z = self._world_z_to_mcs(part["top_z"])  # suction contacts actual top of stack
+                pick_z  = self._world_z_to_mcs(part["top_z"])
                 pending = part
 
         if pick_z is None:
-            return  # nothing to pick yet
+            return   # Kein Bauteil vorhanden
 
-        # ── Guard 3: optional external gate (e.g. H-Bot at home) ─────────────
+        # Bedingung 3: Externer Gate-Check
         if self.pickup_gate is not None and not self.pickup_gate():
             return
 
-        # Convert world targets to SCARA-local MCS (accounts for mounting rotation).
-        # Clamp to reachable ring so targets slightly beyond arm reach move to
-        # the nearest reachable point; the 60 mm suction radius covers the gap.
+        # Positionen in lokale MCS-Koordinaten umrechnen und auf Reichweite klemmen
         self._pick_wx,  self._pick_wy  = self._clamp_local_to_reach(
             *self._world_to_local(pw_x, pw_y))
         self._pick_wz   = pick_z
         self._place_wx, self._place_wy = self._clamp_local_to_reach(
             *self._world_to_local(pl_x, pl_y))
-        # Query stack height at the ACTUAL place position (after clamping).
-        # pl_x/pl_y may be outside reach; the clamped world position is where parts are stored.
+
+        # Stapelhöhe an der tatsächlichen (geklemmten) Weltposition abfragen
         actual_pl_wx, actual_pl_wy = self._local_to_world(self._place_wx, self._place_wy)
-        place_z_world   = self.wpm.get_place_z(actual_pl_wx, actual_pl_wy) if self.wpm else _WPM_PART_TOP
-        self._place_wz  = self._world_z_to_mcs(place_z_world)  # lower to top of current stack
+        place_z_world  = self.wpm.get_place_z(actual_pl_wx, actual_pl_wy) if self.wpm else _WPM_PART_TOP
+        self._place_wz = self._world_z_to_mcs(place_z_world)
         self._pending_wpm_part = pending
 
         self._auto_state = _A_MOVE_ABOVE_PICK
@@ -423,14 +590,19 @@ class RobotController:
         self._joint_mode = False
 
     # =========================================================================
-    # HELPERS
+    # Hilfsmethoden
     # =========================================================================
+
     def _next_auto_state(self):
+        """Wechselt in den nächsten Automatik-Zustand und setzt den Tick-Zähler zurück."""
         self._auto_state += 1
         self._auto_tick   = 0
 
     def _is_at_target(self) -> bool:
-        """True when all ACS actual positions are within tolerance of their set-points."""
+        """
+        Gibt True zurück wenn alle ACS-Achsen ihre Sollpositionen
+        innerhalb der konfigurierten Toleranzen erreicht haben.
+        """
         angular = [self.robot_trafo.acsAxis1,
                    self.robot_trafo.acsAxis2,
                    self.robot_trafo.acsAxis4]
@@ -442,23 +614,36 @@ class RobotController:
         )
 
     def _trigger_auto_fault(self, reason: str):
-        self._fault = True
+        """
+        Löst eine Automatik-Störung aus und setzt den Zustand zurück.
+
+        Parameter
+        ---------
+        reason : str
+            Beschreibung des Störungsgrunds (wird auf der Konsole ausgegeben).
+        """
+        self._fault      = True
         self._auto_state = _A_IDLE
         self._auto_tick  = 0
         self._cancel_vacuum()
         print(f"Auto-Fault: {reason}")
 
-    def _set_mcs_target(self, local_x, local_y, local_z):
+    def _set_mcs_target(self, local_x: float, local_y: float, local_z: float):
+        """
+        Setzt das kartesische Sollziel im Roboter-lokalen MCS.
+
+        Schaltet auf kartesischen Modus (IK) und propagiert Z direkt
+        auf acsAxis3, damit ``_is_at_target()`` sofort reagiert.
+        """
         self._joint_mode = False
         self.robot_trafo.mcsAxisX.Sollposition = local_x
         self.robot_trafo.mcsAxisY.Sollposition = local_y
         self.robot_trafo.mcsAxisZ.Sollposition = local_z
-        # Propagate Z directly to ACS so _is_at_target() sees the correct target
-        # immediately, before backward() runs in update_kinematics().
-        # Valid because mcsAxisZ = L3 + acsAxis3 and L3 is always 0.
+        # Z direkt propagieren: mcsAxisZ = L3 + acsAxis3, L3 ist immer 0
         self.robot_trafo.acsAxis3.Sollposition = local_z
 
     def _activate_vacuum(self):
+        """Aktiviert Vakuum: setzt internen Flag und färbt Saugnapf grün."""
         self._gripper_closed = True
         if hasattr(self.robot_view, "set_gripper"):
             self.robot_view.set_gripper(closed=True)
@@ -466,6 +651,7 @@ class RobotController:
             self.robot_view.attach_part(True)
 
     def _cancel_vacuum(self):
+        """Deaktiviert Vakuum: setzt internen Flag und färbt Saugnapf rot."""
         self._gripper_closed = False
         if hasattr(self.robot_view, "set_gripper"):
             self.robot_view.set_gripper(closed=False)
@@ -473,41 +659,79 @@ class RobotController:
             self.robot_view.attach_part(False)
 
     def _tcp_rotation(self) -> float:
-        """TCP world rotation in degrees (joint sum + mounting rotation)."""
+        """
+        Gibt die TCP-Weltrotation in Grad zurück.
+
+        Summe aus ACS-Gelenken plus Montagedrehung der View.
+        Wird für die korrekte Ausrichtung abgelegter Bauteile verwendet.
+        """
         joint_sum = (self.robot_trafo.acsAxis1.ActualPosition +
                      self.robot_trafo.acsAxis2.ActualPosition +
                      self.robot_trafo.acsAxis4.ActualPosition)
         return joint_sum + getattr(self.robot_view, 'rotation_z', 0.0)
 
     def _world_to_local(self, wx: float, wy: float):
-        """World XY → robot-local MCS XY, accounts for mounting rotation."""
+        """
+        Rechnet Weltkoordinaten in Roboter-lokale MCS-Koordinaten um.
+
+        Berücksichtigt die Montagedrehung ``rotation_z`` der View sowie
+        den Weltversatz ``position`` der Roboterbasis.
+
+        Parameter
+        ---------
+        wx, wy : float
+            Weltkoordinaten [mm].
+
+        Rückgabe
+        --------
+        tuple(float, float)
+            Lokale MCS-Koordinaten (lx, ly) [mm].
+        """
         vp = self.robot_view.position
         dx = wx - vp[0]
         dy = wy - vp[1]
         rot = getattr(self.robot_view, 'rotation_z', 0.0)
         if abs(rot) < 0.01:
             return dx, dy
-        r = -math.radians(rot)   # inverse of mounting rotation
+        r = -math.radians(rot)   # Inverse der Montagedrehung
         return (
             dx * math.cos(r) - dy * math.sin(r),
             dx * math.sin(r) + dy * math.cos(r),
         )
 
     def _local_to_world(self, lx: float, ly: float):
-        """Robot-local MCS XY → world XY, accounts for mounting rotation."""
-        vp = self.robot_view.position
+        """
+        Rechnet Roboter-lokale MCS-Koordinaten in Weltkoordinaten um.
+
+        Inverse zu ``_world_to_local()``.
+
+        Parameter
+        ---------
+        lx, ly : float
+            Lokale MCS-Koordinaten [mm].
+
+        Rückgabe
+        --------
+        tuple(float, float)
+            Weltkoordinaten (wx, wy) [mm].
+        """
+        vp  = self.robot_view.position
         rot = getattr(self.robot_view, 'rotation_z', 0.0)
         if abs(rot) < 0.01:
             return vp[0] + lx, vp[1] + ly
-        r = math.radians(rot)
+        r  = math.radians(rot)
         dx = lx * math.cos(r) - ly * math.sin(r)
         dy = lx * math.sin(r) + ly * math.cos(r)
         return vp[0] + dx, vp[1] + dy
 
     def _tcp_world_pos(self):
         """
-        Return (wx, wy, wz) of the suction cup tip in world coordinates,
-        computed from ACS ActualPositions (where the robot physically IS).
+        Berechnet die Weltposition der Saugnapf-Spitze aus den ACS-Istwerten.
+
+        Rückgabe
+        --------
+        tuple(float, float, float)
+            (wx, wy, wz) der TCP-Spitze in Weltkoordinaten [mm].
         """
         a1  = math.radians(self.robot_trafo.acsAxis1.ActualPosition)
         a2  = math.radians(self.robot_trafo.acsAxis2.ActualPosition)
@@ -520,14 +744,43 @@ class RobotController:
         return wx, wy, ref + self.robot_trafo.acsAxis3.ActualPosition
 
     def _world_z_to_mcs(self, world_z: float) -> float:
-        """Convert an absolute world Z to the required mcsAxisZ (= acsAxis3) value."""
+        """
+        Rechnet eine absolute Welt-Z-Koordinate in den benötigten mcsAxisZ-Wert um.
+
+        Da mcsAxisZ = tcp_z_ref + acsAxis3 (mit L3=0), gilt:
+            mcsAxisZ = world_z - tcp_z_ref
+
+        Parameter
+        ---------
+        world_z : float
+            Absoluter Z-Wert in der 3D-Szene [mm].
+
+        Rückgabe
+        --------
+        float
+            Benötigter mcsAxisZ-Sollwert [mm].
+        """
         ref = getattr(self.robot_view, "tcp_z_ref", self.robot_view.position[2])
         return world_z - ref
 
     def _clamp_local_to_reach(self, lx: float, ly: float):
-        """Clamp a local MCS target to the reachable ring, preserving direction.
-        Used when the world target is slightly beyond the arm's reach so the robot
-        moves as close as possible and the suction radius covers the remaining gap."""
+        """
+        Klemmt ein lokales MCS-Ziel auf den erreichbaren Ring des Arbeitsraums.
+
+        Wenn das Ziel ausserhalb des Rings liegt, wird es in der gleichen
+        Richtung auf die nächste erreichbare Position verschoben.  Der
+        60-mm-Saugnapfradius überbrückt die verbleibende Lücke.
+
+        Parameter
+        ---------
+        lx, ly : float
+            Gewünschte lokale MCS-Koordinaten [mm].
+
+        Rückgabe
+        --------
+        tuple(float, float)
+            Geklemmte lokale Koordinaten innerhalb des Arbeitsraums [mm].
+        """
         L_max = self.robot_trafo.L1 + self.robot_trafo.L2
         L_min = abs(self.robot_trafo.L1 - self.robot_trafo.L2)
         d = math.sqrt(lx ** 2 + ly ** 2)
@@ -541,13 +794,33 @@ class RobotController:
             return lx * f, ly * f
         return lx, ly
 
-    def _any_at_limit(self):
+    def _any_at_limit(self) -> bool:
+        """Gibt True zurück wenn eine ACS-Achse an ihrer Softwarebegrenzung anliegt."""
         return any(a.is_at_limit() for a in [
             self.robot_trafo.acsAxis1, self.robot_trafo.acsAxis2,
             self.robot_trafo.acsAxis3, self.robot_trafo.acsAxis4,
         ])
 
-    def _handle_manual_control(self, hmi_ctrl, step_joint=1, step_world=2):
+    def _handle_manual_control(self, hmi_ctrl,
+                                step_joint: float = 1.0,
+                                step_world: float = 2.0) -> bool:
+        """
+        Übersetzt HMI-Jogtasten in Sollpositions-Inkremente.
+
+        Parameter
+        ---------
+        hmi_ctrl : hmiControl
+            Aktueller HMI-Steuerbefehl.
+        step_joint : float
+            Schrittweite im Gelenkkoordinatensystem [Grad].
+        step_world : float
+            Schrittweite im kartesischen System [mm].
+
+        Rückgabe
+        --------
+        bool
+            True = Gelenkkoordinaten (jog_joint), False = kartesisch.
+        """
         coord_system = getattr(hmi_ctrl, "CoordSystem", "Joint")
         if coord_system not in ["Joint", "Welt", "Werkzeug"]:
             coord_system = "Joint"
@@ -556,10 +829,10 @@ class RobotController:
             self.robot_trafo.jog_joint(da1, da2, da3, da4)
             return True
         dx, dy, dz, dr = self._jog_delta(hmi_ctrl, step_world)
-        # Rotate world-frame jog deltas into robot-local frame (accounts for mounting rotation)
+        # Welt-Jog: Inkrement in Roboter-lokales KS drehen (Montagedrehung berücksichtigen)
         rot = getattr(self.robot_view, 'rotation_z', 0.0)
         if abs(rot) > 0.01:
-            r = -math.radians(rot)
+            r  = -math.radians(rot)
             dx, dy = (dx * math.cos(r) - dy * math.sin(r),
                       dx * math.sin(r) + dy * math.cos(r))
         if coord_system == "Welt":
@@ -568,7 +841,22 @@ class RobotController:
             self.robot_trafo.jog_tool(dx, dy, dz, dr)
         return False
 
-    def _jog_delta(self, hmi_ctrl, step):
+    def _jog_delta(self, hmi_ctrl, step: float):
+        """
+        Berechnet das Jog-Inkrement aus den gedrückten HMI-Tasten.
+
+        Parameter
+        ---------
+        hmi_ctrl : hmiControl
+            Aktueller HMI-Steuerbefehl.
+        step : float
+            Schrittweite pro Tick (positiver Wert).
+
+        Rückgabe
+        --------
+        tuple(float, float, float, float)
+            (dx, dy, dz, dr) — Inkremente für alle vier Freiheitsgrade.
+        """
         dx = (step if hmi_ctrl.MoveXPlus else 0.0) - (step if hmi_ctrl.MoveXNeg else 0.0)
         dy = (step if hmi_ctrl.MoveYPlus else 0.0) - (step if hmi_ctrl.MoveYNeg else 0.0)
         dz = (step if hmi_ctrl.MoveZPlus else 0.0) - (step if hmi_ctrl.MoveZNeg else 0.0)
@@ -576,6 +864,10 @@ class RobotController:
         return dx, dy, dz, dr
 
     def _update_hmi_state(self):
+        """
+        Schreibt die aktuellen ACS-Istwerte und die berechnete TCP-Weltposition
+        in das hmiState-DTO für die HMI-Anzeige.
+        """
         a1_act = self.robot_trafo.acsAxis1.ActualPosition
         a2_act = self.robot_trafo.acsAxis2.ActualPosition
         a3_act = self.robot_trafo.acsAxis3.ActualPosition
@@ -584,7 +876,8 @@ class RobotController:
         self.hmi_state.axisJ2Position = a2_act
         self.hmi_state.axisJ3Position = a3_act
         self.hmi_state.axisJ4Position = a4_act
-        # Compute TCP world position from ACS actual positions via FK + world transform
+
+        # TCP-Weltposition aus ACS-Istwerten via FK + Koordinatentransformation
         r1 = math.radians(a1_act)
         r2 = math.radians(a2_act)
         L1 = self.robot_trafo.L1
