@@ -1,5 +1,14 @@
+"""
+Module: hmiState
+Purpose: Data transfer object for outgoing HMI state (axis positions displayed to operator).
+Responsibilities: Holds current actual positions; written by RobotController, read by Hmi.setHmiState().
+Inputs:  Position values from RobotController._update_hmi_state().
+Outputs: Values consumed by Hmi label widgets.
+Dependencies: none
+"""
 import sys
 sys.path.append('../ViewModel')
+
 
 class hmiState:
     def __init__(self):

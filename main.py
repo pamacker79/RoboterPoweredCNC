@@ -1,4 +1,23 @@
+"""
+Module: main (Machine)
+Purpose: Application entry point; owns the 100 Hz control loop and wires all MVC layers.
+Responsibilities: Create model/view/HMI objects, run the cyclic loop (HMI→kinematics→view),
+                  manage window lifecycle, coordinate H-Bot auto-sequence.
+Inputs:  Operator input via Tkinter HMI windows; G-Code file for auto mode.
+Outputs: 3D PyVista scene updates; HMI state display updates.
+Dependencies: Model.*, View.*, ViewModel.*, tkinter, pyvista
+"""
+import os
 import sys
+
+python_base = sys.base_prefix
+tcl_path = os.path.join(python_base, "tcl", "tcl8.6")
+tk_path  = os.path.join(python_base, "tcl", "tk8.6")
+if os.path.exists(tcl_path):
+    os.environ["TCL_LIBRARY"] = tcl_path
+if os.path.exists(tk_path):
+    os.environ["TK_LIBRARY"] = tk_path
+
 sys.path.append('./Model')
 sys.path.append('./ViewModel')
 sys.path.append('./View')
@@ -7,147 +26,168 @@ import time
 import tkinter as tk
 import pyvista as pv
 
-from Model.hBot import hBot
-from Model.Scara import Scara
-from Model.CncInterpreter import CncInterpreter
+from Model.hBot             import hBot
+from Model.Scara            import Scara
+from Model.WorkpieceManager import WorkpieceManager
 
-from View.Scara import Scara as ScaraView
-from View.HBot import HBot as HBotView
+from View.Scara        import Scara as ScaraView
+from View.HBot         import HBot  as HBotView
+from View.MagazinViewPV import MagazinViewPV
 
-from ViewModel.hmi import Hmi
-from ViewModel.hmiState import hmiState
+from Model.RobotConfig        import SCARA_HOME
+
+from ViewModel.hmi            import Hmi
+from ViewModel.hmiHBot        import HmiHBot
+from ViewModel.hmiState       import hmiState
+from ViewModel.RobotController import RobotController
+
+# ── World-coordinate landmarks ────────────────────────────────────────────────
+_HBOT_WORLD          = (381.0, 195.0)   # H-Bot work-surface centre (Weltkoordinaten)
+_HBOT_ENGRAVE_CENTER = (80.0, -155.0)  # H-Bot MCS coordinates for laser over workpiece
+_DEPOSIT_WORLD       = (900.0, -720.0)  # Robot 3 deposit position (to the right)
+_MAG_PICKUP_WORLD    = (-300.0, -325.0)  # Magazine centre (matches MagazinViewPV position)
+
+# ── H-Bot auto-sequence states ────────────────────────────────────────────────
+_HB_IDLE      = 0
+_HB_APPROACH  = 4   # move to workpiece centre before engraving
+_HB_ENGRAVE   = 1   # simulated engraving moves
+_HB_RETURN    = 2   # return head to parking position
+_HB_DONE      = 3   # ready for Robot 3 pickup
+
 
 
 class Machine:
     def __init__(self):
-        # ========================================================
-        # PROGRAMM LÄUFT
-        # ========================================================
         self.running = True
 
-        # ========================================================
-        # MODELLE
-        # ========================================================
+        # ── Models ───────────────────────────────────────────────────────────
         self.robot1Trafo = Scara()
-        self.robot2Trafo = Scara()
+        self.robot3Trafo = Scara()
 
-        self.robot1CncControl = CncInterpreter()
-        self.interpolated_path = None
-
+        # Beide Roboter auf SCARA_HOME initialisieren (= Endposition der Sequenz)
+        for trafo in (self.robot1Trafo, self.robot3Trafo):
+            for attr, val in SCARA_HOME.items():
+                ax = getattr(trafo, attr)
+                ax.Sollposition   = val
+                ax.ActualPosition = val
         self.CncTrafo = hBot()
+        self.wpm = WorkpieceManager()
 
-        # H-Bot Positionen
-        self.hbotX = 0.0
-        self.hbotY = 0.0
+        # H-Bot Startposition (Arm an Werkzeugposition)
+        _HBOT_START_X = _HBOT_WORLD[0]
+        _HBOT_START_Y = _HBOT_WORLD[1]
+        self.hbotX = _HBOT_START_X
+        self.hbotY = _HBOT_START_Y
+        self.CncTrafo.mcsAxisX.Sollposition  = _HBOT_START_X
+        self.CncTrafo.mcsAxisX.ActualPosition = _HBOT_START_X
+        self.CncTrafo.mcsAxisY.Sollposition  = _HBOT_START_Y
+        self.CncTrafo.mcsAxisY.ActualPosition = _HBOT_START_Y
 
-        # ========================================================
-        # GREIFER STATUS
-        # ========================================================
-        self.robot1GripperClosed = False
-        self.robot2GripperClosed = False
+        # H-Bot auto state
+        self._hb_state = _HB_IDLE
+        self._hb_tick  = 0
+        # Gravurmuster: Quadrat mit 50 mm Radius um Lasermittelpunkt (_HBOT_ENGRAVE_CENTER)
+        cx, cy = _HBOT_ENGRAVE_CENTER
+        r = 50.0
+        self._hb_engrave_moves = [
+            (cx,     cy    ),  # Mitte (Bauteil-Zentrum)
+            (cx,     cy + r),  # Nord
+            (cx + r, cy + r),  # Nord-Ost
+            (cx + r, cy - r),  # Süd-Ost
+            (cx - r, cy - r),  # Süd-West
+            (cx - r, cy + r),  # Nord-West
+            (cx,     cy    ),  # zurück zur Mitte
+        ]
+        self._hb_move_idx = 0
+        self.hbot_at_home = True   # Robot 3 checks this before picking
 
-        # ========================================================
-        # MODI
-        # ========================================================
-        self.Robot1JointMode = True
-        self.Robot1Manual = True
-
-        self.Robot2JointMode = True
-        self.Robot2Manual = True
-
-        # ========================================================
-        # HMI STATES
-        # ========================================================
-        self.hmi1State = hmiState()
-        self.hmi2State = hmiState()
-        self.hmiCncState = hmiState()
-
-        # ========================================================
-        # HMI FENSTER ERSTELLEN
-        # ========================================================
+        # ── HMI window ───────────────────────────────────────────────────────
         self.hmiRoot = tk.Tk()
         self.hmiRoot.title("3 Roboter")
-        self.hmiRoot.geometry("1250x450")
-
+        self.hmiRoot.geometry("1250x475")
         self.hmiRoot.protocol("WM_DELETE_WINDOW", self.close_program)
 
         self.frame1 = tk.Frame(self.hmiRoot)
         self.frame1.pack(side="left", padx=5)
-
         self.frame2 = tk.Frame(self.hmiRoot)
         self.frame2.pack(side="left", padx=5)
-
         self.frame3 = tk.Frame(self.hmiRoot)
         self.frame3.pack(side="left", padx=5)
 
         self.hmiRobot1 = Hmi(self.frame1, "Roboter 1 SCARA")
-        self.hmiCnc = Hmi(self.frame2, "Roboter 2 H-Bot")
-        self.hmiRobot2 = Hmi(self.frame3, "Roboter 3 SCARA")
+        self.hmiCnc    = HmiHBot(self.frame2, "H-Bot (Gravur)")
+        self.hmiRobot3 = Hmi(self.frame3, "Roboter 3 SCARA")
 
-        # ========================================================
-        # GEMEINSAMES PYVISTA-FENSTER
-        # ========================================================
+        self.hmi1State   = hmiState()
+        self.hmi3State   = hmiState()
+        self.hmiCncState = hmiState()
+
+        # ── Shared PyVista scene ─────────────────────────────────────────────
         self.sharedPlotter = pv.Plotter()
 
-        # Reihenfolge:
-        # SCARA 1 links
-        self.scaraView1 = ScaraView(
-            pl=self.sharedPlotter,
-            position=(-1000, 250, 0)
-        )
+        # Robot 3 repositioned to (400, 300, 0) so it can reach H-Bot at (0,0)
+        self.scaraView1  = ScaraView(pl=self.sharedPlotter, position=(-150,  250, 0), rotation_z=180.0)
+        self.cncView     = HBotView( pl=self.sharedPlotter, position=(    0,    0, 150))
+        self.scaraView3  = ScaraView(pl=self.sharedPlotter, position=(900 ,  170, 0), rotation_z=180.0, base_rotation_z=0.0)
+        self.magazinView = MagazinViewPV(pl=self.sharedPlotter, position=(-300, -325, 0))
 
-        # H-Bot in der Mitte
-        self.cncView = HBotView(
-            pl=self.sharedPlotter,
-            position=(0, 0, 200)
-        )
-
-        # SCARA 2 rechts
-        self.scaraView2 = ScaraView(
-            pl=self.sharedPlotter,
-            position=(1300, 250, 0)
-        )
-
-        # Greifer Startzustand setzen
-        if hasattr(self.scaraView1, "set_gripper"):
-            self.scaraView1.set_gripper(closed=self.robot1GripperClosed)
-
-        if hasattr(self.scaraView2, "set_gripper"):
-            self.scaraView2.set_gripper(closed=self.robot2GripperClosed)
-
-        # Kamera / Ansicht
         self.sharedPlotter.show_axes()
-
         self.sharedPlotter.camera_position = [
-            (400.0, -2700.0, 1600.0),
-            (250.0, 250.0, 0.0),
-            (0.0, 0.0, 1.0)
+            (  0.0, -1500.0, 1000.0),
+            (  0.0,     0.0,    0.0),
+            (  0.0,     0.0,    1.0)
         ]
+        self.sharedPlotter.show(interactive_update=True, auto_close=False)
 
-        self.sharedPlotter.show(
-            interactive_update=True,
-            auto_close=False
+        # ── Robot controllers ─────────────────────────────────────────────────
+        # Robot 1: picks from magazine, places at H-Bot centre
+        # pickup_gate: only start when Robot 3 is at home (collision prevention)
+        self.robot1_ctrl = RobotController(
+            robot_trafo   = self.robot1Trafo,
+            robot_view    = self.scaraView1,
+            hmi           = self.hmiRobot1,
+            hmi_state     = self.hmi1State,
+            workpiece_manager = self.wpm,
+            magazin_view  = self.magazinView,
+            pickup_world  = _MAG_PICKUP_WORLD,
+            place_world   = _HBOT_WORLD,
+            pickup_gate   = self._robot1_pickup_allowed,
         )
 
-    # ============================================================
-    # PROGRAMM SCHLIESSEN
-    # ============================================================
+        # Robot 3: picks from H-Bot centre, deposits to the right
+        # pickup_gate: only start when H-Bot has returned to home position
+        self.robot3_ctrl = RobotController(
+            robot_trafo   = self.robot3Trafo,
+            robot_view    = self.scaraView3,
+            hmi           = self.hmiRobot3,
+            hmi_state     = self.hmi3State,
+            workpiece_manager = self.wpm,
+            magazin_view  = None,
+            pickup_world  = _HBOT_WORLD,
+            place_world   = _DEPOSIT_WORLD,
+            pickup_gate   = self._robot3_pickup_allowed,
+            place_is_sink = True,
+        )
+
+        self.scara_controllers = [self.robot1_ctrl, self.robot3_ctrl]
+
+    # =========================================================================
+    # CLOSE
+    # =========================================================================
     def close_program(self):
         self.running = False
-
         try:
             self.sharedPlotter.close()
         except Exception:
             pass
-
         try:
             self.hmiRoot.destroy()
         except Exception:
             pass
 
-    # ============================================================
-    # TKINTER HMI AKTUALISIEREN
-    # ============================================================
+    # =========================================================================
+    # HMI WINDOW
+    # =========================================================================
     def update_hmi_window(self):
         try:
             self.hmiRoot.update_idletasks()
@@ -155,338 +195,157 @@ class Machine:
         except tk.TclError:
             self.running = False
 
-    # ============================================================
-    # SCARA MANUELLE STEUERUNG
-    # ============================================================
-    def handle_scara_manual_control(self, robotTrafo, hmiControl, step_joint=1, step_world=2):
-        """
-        Steuert einen SCARA-Roboter im Joint- oder Weltkoordinatensystem.
-        """
-
-        coord_system = getattr(hmiControl, "CoordSystem", "Joint")
-
-        # Falls im HMI noch "wählen" steht, standardmässig Joint verwenden
-        if coord_system not in ["Joint", "Welt", "Werkzeug"]:
-            coord_system = "Joint"
-
-        joint_mode = coord_system == "Joint"
-
-        if joint_mode:
-            # Joint-Modus
-            if hmiControl.MoveXPlus:
-                robotTrafo.acsAxis1.Sollposition += step_joint
-            if hmiControl.MoveXNeg:
-                robotTrafo.acsAxis1.Sollposition -= step_joint
-
-            if hmiControl.MoveYPlus:
-                robotTrafo.acsAxis2.Sollposition += step_joint
-            if hmiControl.MoveYNeg:
-                robotTrafo.acsAxis2.Sollposition -= step_joint
-
-            if hmiControl.MoveZPlus:
-                robotTrafo.acsAxis3.Sollposition += step_joint
-            if hmiControl.MoveZNeg:
-                robotTrafo.acsAxis3.Sollposition -= step_joint
-
-            if hmiControl.MoveRPlus:
-                robotTrafo.acsAxis4.Sollposition += step_joint
-            if hmiControl.MoveRNeg:
-                robotTrafo.acsAxis4.Sollposition -= step_joint
-
-        else:
-            # Weltkoordinaten-Modus
-            if hmiControl.MoveXPlus:
-                robotTrafo.mcsAxisX.Sollposition += step_world
-            if hmiControl.MoveXNeg:
-                robotTrafo.mcsAxisX.Sollposition -= step_world
-
-            if hmiControl.MoveYPlus:
-                robotTrafo.mcsAxisY.Sollposition += step_world
-            if hmiControl.MoveYNeg:
-                robotTrafo.mcsAxisY.Sollposition -= step_world
-
-            if hmiControl.MoveZPlus:
-                robotTrafo.mcsAxisZ.Sollposition += step_world
-            if hmiControl.MoveZNeg:
-                robotTrafo.mcsAxisZ.Sollposition -= step_world
-
-            if hmiControl.MoveRPlus:
-                robotTrafo.mcsAxisR.Sollposition += step_world
-            if hmiControl.MoveRNeg:
-                robotTrafo.mcsAxisR.Sollposition -= step_world
-
-        return joint_mode
-
-    # ============================================================
-    # HMI STATUS SCARA
-    # ============================================================
-    def update_scara_hmi_state(self, robotTrafo, state):
-        state.axisJ1Position = robotTrafo.acsAxis1.ActualPosition
-        state.axisJ2Position = robotTrafo.acsAxis2.ActualPosition
-        state.axisJ3Position = robotTrafo.acsAxis3.ActualPosition
-        state.axisJ4Position = robotTrafo.acsAxis4.ActualPosition
-
-        state.axisXPosition = robotTrafo.mcsAxisX.ActualPosition
-        state.axisYPosition = robotTrafo.mcsAxisY.ActualPosition
-        state.axisZPosition = robotTrafo.mcsAxisZ.ActualPosition
-        state.axisRPosition = robotTrafo.mcsAxisR.ActualPosition
-
-    # ============================================================
-    # GREIFER STEUERUNG
-    # ============================================================
-    def handle_gripper_control_robot1(self, hmiControl):
-        """
-        Roboter 1:
-        Start = Greifer schliessen
-        Stop  = Greifer öffnen
-        """
-
-        if getattr(hmiControl, "Start", False):
-            self.robot1GripperClosed = True
-
-        if getattr(hmiControl, "Stop", False):
-            self.robot1GripperClosed = False
-
-        if hasattr(self.scaraView1, "set_gripper"):
-            self.scaraView1.set_gripper(closed=self.robot1GripperClosed)
-
-    def handle_gripper_control_robot2(self, hmiControl):
-        """
-        Roboter 2:
-        Start = Greifer schliessen
-        Stop  = Greifer öffnen
-        """
-
-        if getattr(hmiControl, "Start", False):
-            self.robot2GripperClosed = True
-
-        if getattr(hmiControl, "Stop", False):
-            self.robot2GripperClosed = False
-
-        if hasattr(self.scaraView2, "set_gripper"):
-            self.scaraView2.set_gripper(closed=self.robot2GripperClosed)
-
-    # ============================================================
-    # HMI ROBOTER 1 AUSLESEN
-    # ============================================================
-    def update_hmi_robot1(self):
-        hmiControl = self.hmiRobot1.getHmiControl()
-
-        self.Robot1Manual = hmiControl.OperationMode == 0
-
-        if self.Robot1Manual:
-            self.Robot1JointMode = self.handle_scara_manual_control(
-                self.robot1Trafo,
-                hmiControl
-            )
-
-            self.handle_gripper_control_robot1(hmiControl)
-
-        else:
-            # Automatik nur in Weltkoordinaten
-            self.Robot1JointMode = False
-
-            if hmiControl.Start:
-                self.robot1CncControl.load_from_path("Model\\programm.nc")
-                self.interpolated_path = iter(
-                    self.robot1CncControl.interpolate_path(step_size=3.0)
-                )
-                hmiControl.Start = False
-
-        self.update_scara_hmi_state(
-            self.robot1Trafo,
-            self.hmi1State
-        )
-
-        self.hmiRobot1.setHmiState(self.hmi1State)
-
-    # ============================================================
-    # HMI ROBOTER 2 / RECHTER SCARA AUSLESEN
-    # ============================================================
-    def update_hmi_robot2(self):
-        hmiControl = self.hmiRobot2.getHmiControl()
-
-        self.Robot2Manual = hmiControl.OperationMode == 0
-
-        if self.Robot2Manual:
-            self.Robot2JointMode = self.handle_scara_manual_control(
-                self.robot2Trafo,
-                hmiControl
-            )
-
-            self.handle_gripper_control_robot2(hmiControl)
-
-        else:
-            # Rechter SCARA aktuell ohne CNC-Automatik
-            self.Robot2JointMode = False
-
-        self.update_scara_hmi_state(
-            self.robot2Trafo,
-            self.hmi2State
-        )
-
-        self.hmiRobot2.setHmiState(self.hmi2State)
-
-    # ============================================================
-    # HMI H-BOT AUSLESEN
-    # ============================================================
+    # =========================================================================
+    # H-BOT CONTROL (manual jogging + auto-sequence)
+    # =========================================================================
     def update_hmi_hbot(self):
-        hmiControl = self.hmiCnc.getHmiControl()
+        hmi_ctrl = self.hmiCnc.getHmiControl()
+        is_auto  = (hmi_ctrl.OperationMode == 1)
+        override = hmi_ctrl.OverridePercent / 100.0
 
-        # H-Bot:
-        # X+ / X- bewegt Schlitten
-        # Y+ / Y- bewegt Brücke
-        if hmiControl.MoveXPlus:
-            self.hbotX += 5
-        if hmiControl.MoveXNeg:
-            self.hbotX -= 5
+        if not hmi_ctrl.mode_selected:
+            self.hmiCnc.setStatus("Betriebsmodus wählen!", "orange")
+        elif is_auto:
+            self._update_hbot_auto()
+        else:
+            # Manual jogging — Sollposition sets target, cyclic applies ramp
+            if hmi_ctrl.MoveXPlus:
+                self.CncTrafo.mcsAxisX.Sollposition += 5
+            if hmi_ctrl.MoveXNeg:
+                self.CncTrafo.mcsAxisX.Sollposition -= 5
+            if hmi_ctrl.MoveYPlus:
+                self.CncTrafo.mcsAxisY.Sollposition += 5
+            if hmi_ctrl.MoveYNeg:
+                self.CncTrafo.mcsAxisY.Sollposition -= 5
 
-        if hmiControl.MoveYPlus:
-            self.hbotY += 5
-        if hmiControl.MoveYNeg:
-            self.hbotY -= 5
+        # Motion ramp — moves ActualPosition toward Sollposition at override-scaled speed
+        self.CncTrafo.cyclic(override)
 
-        # Begrenzung
-        if self.hbotX > 300:
-            self.hbotX = 300
-        if self.hbotX < -300:
-            self.hbotX = -300
+        # View and HMI always follow ActualPosition (smooth interpolation)
+        self.hbotX = self.CncTrafo.mcsAxisX.ActualPosition
+        self.hbotY = self.CncTrafo.mcsAxisY.ActualPosition
 
-        if self.hbotY > 300:
-            self.hbotY = 300
-        if self.hbotY < -300:
-            self.hbotY = -300
-
-        # HMI Anzeige für H-Bot
         self.hmiCncState.axisXPosition = self.hbotX
         self.hmiCncState.axisYPosition = self.hbotY
         self.hmiCncState.axisZPosition = 0.0
         self.hmiCncState.axisRPosition = 0.0
-
         self.hmiCnc.setHmiState(self.hmiCncState)
 
-    # ============================================================
-    # ALLE HMIs AUSLESEN
-    # ============================================================
-    def update_hmis(self):
-        self.update_hmi_robot1()
-        self.update_hmi_hbot()
-        self.update_hmi_robot2()
+    def _hbot_at_target(self, tol: float = 1.0) -> bool:
+        """True when ActualPosition has reached Sollposition within tolerance."""
+        return (
+            abs(self.CncTrafo.mcsAxisX.ActualPosition
+                - self.CncTrafo.mcsAxisX.Sollposition) <= tol
+            and
+            abs(self.CncTrafo.mcsAxisY.ActualPosition
+                - self.CncTrafo.mcsAxisY.Sollposition) <= tol
+        )
 
-    # ============================================================
-    # KINEMATIK ROBOTER 1
-    # ============================================================
-    def update_robot1_kinematics(self):
-        try:
-            if self.Robot1JointMode:
-                self.robot1Trafo.forward()
+    def _update_hbot_auto(self):
+        """H-Bot automatic engraving sequence — arrival-based state transitions."""
+        self._hb_tick += 1
+
+        if self._hb_state == _HB_IDLE:
+            part_ready   = self.wpm.has_part_at(_HBOT_WORLD[0], _HBOT_WORLD[1], radius=60.0)
+            robot1_clear = self.robot1_ctrl.is_idle
+            if part_ready and robot1_clear:
+                # Set approach target once on state entry
+                self.CncTrafo.mcsAxisX.Sollposition = _HBOT_ENGRAVE_CENTER[0]
+                self.CncTrafo.mcsAxisY.Sollposition = _HBOT_ENGRAVE_CENTER[1]
+                self._hb_state    = _HB_APPROACH
+                self._hb_tick     = 0
+                self.hbot_at_home = False
+                self.hmiCnc.setStatus("Fahre auf Werkstück...", "lightyellow")
+            elif part_ready:
+                self.hmiCnc.setStatus("Warte auf Roboter 1...", "lightsalmon")
+
+        elif self._hb_state == _HB_APPROACH:
+            # Transition when head has physically arrived at the engraving centre
+            if self._hbot_at_target():
+                self._hb_state    = _HB_ENGRAVE
+                self._hb_tick     = 0
+                self._hb_move_idx = 0
+                self.hmiCnc.setStatus("Gravur läuft...", "lightyellow")
+
+        elif self._hb_state == _HB_ENGRAVE:
+            if self._hb_move_idx < len(self._hb_engrave_moves):
+                # Hold current waypoint as Sollposition every tick
+                tx, ty = self._hb_engrave_moves[self._hb_move_idx]
+                self.CncTrafo.mcsAxisX.Sollposition = tx
+                self.CncTrafo.mcsAxisY.Sollposition = ty
+                # Advance to next waypoint only after physical arrival
+                if self._hbot_at_target():
+                    self._hb_move_idx += 1
             else:
-                self.robot1Trafo.backward()
+                # All waypoints done — set return target and transition
+                self.CncTrafo.mcsAxisX.Sollposition = 300
+                self.CncTrafo.mcsAxisY.Sollposition = 100
+                self._hb_state = _HB_RETURN
+                self._hb_tick  = 0
 
-        except ValueError as e:
-            print("Roboter 1 Fehler:", e)
+        elif self._hb_state == _HB_RETURN:
+            if self._hbot_at_target():
+                self._hb_state    = _HB_DONE
+                self._hb_tick     = 0
+                self.hbot_at_home = True
+                self.hmiCnc.setStatus("Gravur fertig — warte auf Roboter 3", "lightcyan")
 
-            self.robot1Trafo.mcsAxisX.Sollposition = self.robot1Trafo.mcsAxisX.ActualPosition
-            self.robot1Trafo.mcsAxisY.Sollposition = self.robot1Trafo.mcsAxisY.ActualPosition
-            self.robot1Trafo.mcsAxisZ.Sollposition = self.robot1Trafo.mcsAxisZ.ActualPosition
-            self.robot1Trafo.mcsAxisR.Sollposition = self.robot1Trafo.mcsAxisR.ActualPosition
+        elif self._hb_state == _HB_DONE:
+            if not self.wpm.has_part_at(_HBOT_WORLD[0], _HBOT_WORLD[1], radius=60.0):
+                self._hb_state = _HB_IDLE
+                self._hb_tick  = 0
+                self.hmiCnc.setStatus("Bereit", "lightgreen")
 
-    # ============================================================
-    # KINEMATIK ROBOTER 2
-    # ============================================================
-    def update_robot2_kinematics(self):
-        try:
-            if self.Robot2JointMode:
-                self.robot2Trafo.forward()
-            else:
-                self.robot2Trafo.backward()
+        self.hmiCnc.setSequenceState(
+            self._hb_state,
+            engrave_step  = self._hb_move_idx,
+            engrave_total = len(self._hb_engrave_moves),
+        )
 
-        except ValueError as e:
-            print("Roboter 2 Fehler:", e)
-
-            self.robot2Trafo.mcsAxisX.Sollposition = self.robot2Trafo.mcsAxisX.ActualPosition
-            self.robot2Trafo.mcsAxisY.Sollposition = self.robot2Trafo.mcsAxisY.ActualPosition
-            self.robot2Trafo.mcsAxisZ.Sollposition = self.robot2Trafo.mcsAxisZ.ActualPosition
-            self.robot2Trafo.mcsAxisR.Sollposition = self.robot2Trafo.mcsAxisR.ActualPosition
-
-    # ============================================================
-    # CNC PFAD ROBOTER 1
-    # ============================================================
-    def update_robot1_cnc_path(self):
-        self.robot1CncControl.position = {
-            "X": self.robot1Trafo.mcsAxisX.ActualPosition,
-            "Y": self.robot1Trafo.mcsAxisY.ActualPosition,
-            "Z": self.robot1Trafo.mcsAxisZ.ActualPosition
-        }
-
-        if self.interpolated_path is not None:
-            point = next(self.interpolated_path, None)
-
-            if point is not None:
-                self.robot1Trafo.mcsAxisX.Sollposition = point["X"]
-                self.robot1Trafo.mcsAxisY.Sollposition = point["Y"]
-                self.robot1Trafo.mcsAxisZ.Sollposition = point["Z"]
-
-    # ============================================================
-    # 3D VIEW AKTUALISIEREN
-    # ============================================================
+    # =========================================================================
+    # 3D VIEW UPDATE
+    # =========================================================================
     def update_views(self):
         try:
-            # SCARA 1 links
-            self.scaraView1.update_joints(
-                self.robot1Trafo.acsAxis1.getSetPosition(),
-                self.robot1Trafo.acsAxis2.getSetPosition(),
-                self.robot1Trafo.acsAxis4.getSetPosition()
-            )
-
-            # H-Bot Mitte
-            self.cncView.update_mesh_positions(
-                x_pos=self.hbotX,
-                y_pos=self.hbotY
-            )
-
-            # SCARA 2 rechts
-            self.scaraView2.update_joints(
-                self.robot2Trafo.acsAxis1.getSetPosition(),
-                self.robot2Trafo.acsAxis2.getSetPosition(),
-                self.robot2Trafo.acsAxis4.getSetPosition()
-            )
-
+            self.cncView.update_mesh_positions(x_pos=self.hbotX, y_pos=self.hbotY)
         except RuntimeError:
             pass
 
+    # =========================================================================
+    # HANDSHAKE GUARDS
+    # =========================================================================
+    def _robot1_pickup_allowed(self):
+        """
+        Robot 1 may only start when Robot 3 is idle (at home position).
+        Prevents collisions when both robots operate at different overrides.
+        """
+        return self.robot3_ctrl.is_idle
 
-# ================================================================
-# HAUPTPROGRAMM
-# ================================================================
+    def _robot3_pickup_allowed(self):
+        """
+        Robot 3 may only start when the H-Bot is in _HB_DONE state —
+        meaning engraving is finished AND the head has returned to home.
+        """
+        return self._hb_state == _HB_DONE
+
+
+# =============================================================================
+# MAIN LOOP
+# =============================================================================
 if __name__ == "__main__":
     machine = Machine()
 
     while machine.running:
-        # HMI-Fenster aktualisieren
         machine.update_hmi_window()
+        machine.update_hmi_hbot()
 
-        # HMI-Werte auslesen
-        machine.update_hmis()
+        for ctrl in machine.scara_controllers:
+            ctrl.update_hmi()
+            ctrl.update_kinematics()
+            ctrl.cyclic()
+            ctrl.update_view()
 
-        # Roboter 1 Kinematik
-        machine.update_robot1_kinematics()
-
-        # CNC-Pfad Roboter 1
-        machine.update_robot1_cnc_path()
-
-        # Roboter 1 Achsen zyklisch bewegen
-        machine.robot1Trafo.cyclic()
-
-        # Roboter 2 Kinematik
-        machine.update_robot2_kinematics()
-
-        # Roboter 2 Achsen zyklisch bewegen
-        machine.robot2Trafo.cyclic()
-
-        # 3D-Fenster aktualisieren
         machine.update_views()
-
         time.sleep(0.01)
 
     print("Programm beendet.")

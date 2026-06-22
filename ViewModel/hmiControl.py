@@ -1,3 +1,11 @@
+"""
+Module: hmiControl
+Purpose: Data transfer object for incoming HMI commands (button/switch states from operator).
+Responsibilities: Holds jog, Start/Stop/Reset, mode, and override values; written by Hmi, read by RobotController.
+Inputs:  Button/slider events from Hmi widget handlers.
+Outputs: Control flags consumed by RobotController.update_hmi().
+Dependencies: none
+"""
 import sys
 sys.path.append('../ViewModel')
 
@@ -13,18 +21,11 @@ class hmiControl:
         self.MoveRPlus = False
         self.MoveRNeg = False
 
-        self.MoveJ1Plus = False
-        self.MoveJ1Neg = False
-        self.MoveJ2Plus = False
-        self.MoveJ2Neg = False
-        self.MoveJ3Plus = False
-        self.MoveJ3Neg = False
-        self.MoveJ4Plus = False
-        self.MoveJ4Neg = False
+        self.Saugen = False
+        self.Reset = False
 
-        self.Start = False
-        self.Stop = False
-
-        self.OperationMode = 0 # 0=Manual / 1=Automatic
-        self.CoordSystem = "wählen" # Hilfsvariable für das Koordinatensystem
+        self.OperationMode  = 0       # 0=Manual / 1=Automatic
+        self.mode_selected  = False   # True once operator picks a mode from the combo
+        self.CoordSystem    = "wählen"
+        self.OverridePercent = 100    # 0–100 %
 

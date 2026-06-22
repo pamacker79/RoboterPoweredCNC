@@ -1,3 +1,11 @@
+"""
+Module: View.HBot
+Purpose: 3D visualization of the H-Bot gantry robot in a shared PyVista scene.
+Responsibilities: Load H-Bot STL meshes, add actors to plotter, animate bridge and tool positions.
+Inputs:  x_pos, y_pos from main control loop via update_mesh_positions().
+Outputs: Updated PyVista actor positions each frame.
+Dependencies: pyvista, View/H_Bot_Modell/*.stl
+"""
 import os
 import pyvista as pv
 
