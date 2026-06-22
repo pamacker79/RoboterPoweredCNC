@@ -194,3 +194,9 @@ RoboterPoweredCNC/
     ├── hmiState.py
     └── RobotController.py
 ```
+<img width="2252" height="618" alt="image" src="https://github.com/user-attachments/assets/92990b30-7c07-42c8-ba7d-6ddbf7e755fd" />
+<img width="982" height="726" alt="image" src="https://github.com/user-attachments/assets/a9e3b9b8-2be1-489b-9c4a-1349cc7f6965" />
+<img width="982" height="726" alt="image" src="https://github.com/user-attachments/assets/da412c82-db1f-4e99-a48b-2d0865c0fe28" />
+<img width="1240" height="77" alt="image" src="https://github.com/user-attachments/assets/c888b8ec-feed-4260-b877-2900f1f5b2ca" />
+
+
