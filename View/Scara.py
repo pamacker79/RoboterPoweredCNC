@@ -1,13 +1,50 @@
 """
-Modul zur 3D-Visualisierung und kinematischen Steuerung eines Roboterarms.
+Modul: View.Scara
+==================
+3D-Visualisierung und kinematische Animation eines SCARA-Roboterarms.
 
-Dieses Modul nutzt pyvista und vtk, um die STL-Modelle eines SCARA-Roboters
-zu laden, grafisch darzustellen und durch Vorwärtskinematik zu animieren.
+Aufbau der 3D-Szene
+--------------------
+Jeder SCARA-Roboter besteht aus vier STL-Teilen plus einem dynamisch
+erzeugten Vakuumsauger:
 
-Neu:
-- position=(x, y, z), damit mehrere Roboter im gleichen Fenster stehen können
-- Vakuumsauger (Saugnapf) anstelle eines Parallelgreifers
-- Sauger fährt und rotiert mit der Spindel mit
+* **Base.stl**      – Sockelprofil (ortsfest)
+* **InnerArm.stl**  – Oberarm (dreht um Schultergelenk J1)
+* **OuterArm.stl**  – Unterarm (dreht um Ellbogengelenk J2, folgt J1)
+* **Spindle.stl**   – Hubspindel + Werkzeugdrehachse J4 (dreht und hebt)
+* Vakuumsauger      – Halterung + Saugnapf aus PyVista-Primitiven
+
+Kinematische Transformationskette
+----------------------------------
+Die Transformationen werden mit ``vtk.vtkTransform`` verkettigt:
+
+* J1-Frame: Rotation um Schultergelenk (+ Montagedrehung ``rotation_z``)
+* J2-Frame: Rotation um Ellbogengelenk, danach J1-Frame anwenden
+* TCP-Frame: J4-Rotation, dann J2-Frame, dann J1-Frame, dann Z-Hub
+
+Diese Reihenfolge entspricht der Vorwärtskinematik im Modell (Scara.py)
+und stellt sicher, dass sich jedes Segment korrekt gegenüber seinem
+Vorgänger bewegt.
+
+Montagedrehung (rotation_z)
+----------------------------
+Da die STL-Modelle in Nullstellung in -X zeigen, die Kinematik jedoch
++X als Referenz nimmt, wird ``rotation_z=180°`` verwendet, um die Basis
+korrekt auszurichten.  Für Roboter 3 (spiegelverkehrt montiert) kann ein
+separater ``base_rotation_z`` für das Gehäuse gesetzt werden.
+
+TCP-Referenz (tcp_z_ref)
+-------------------------
+``tcp_z_ref`` ist die Z-Weltkoordinate der Saugnapf-Spitze bei
+``acsAxis3 = 0`` (Spindel vollständig oben).  Der RobotController nutzt
+diesen Wert, um die Solltauchtiefe korrekt aus der Weltkoordinate des
+Bauteils zu berechnen.
+
+Abhängigkeiten
+--------------
+* ``pyvista`` — 3D-Visualisierungsbibliothek
+* ``vtk``     — Transformationsverkettung mit vtkTransform
+* ``View/Scara_Modell/*.stl`` — STL-Arm-Dateien
 """
 
 import sys
@@ -20,234 +57,224 @@ import vtk
 
 class Scara:
     """
-    Lädt die 3D-Modelle des Roboters und stellt eine interaktive Umgebung bereit.
+    Lädt die SCARA-STL-Modelle und animiert sie im gemeinsamen PyVista-Fenster.
 
-    Args:
-        data_folder_path (str, optional): Pfad zum STL-Ordner.
-        pl (pyvista.Plotter, optional): Gemeinsames PyVista-Fenster.
-        position (tuple): Verschiebung des ganzen Roboters, z.B. (0, 800, 0)
+    Parameter
+    ---------
+    data_folder_path : str oder None
+        Pfad zum STL-Ordner.  Bei None wird ``./View/Scara_Modell`` verwendet.
+    pl : pyvista.Plotter oder None
+        Gemeinsames PyVista-Fenster.  Bei None wird ein eigenes erstellt.
+    position : tuple(float, float, float)
+        Weltposition der Roboterbasis [mm].  Alle Gelenk-Drehpunkte werden
+        um diesen Offset verschoben.
+    rotation_z : float
+        Kinematische Montagedrehung [Grad].  Dreht den gesamten Arm inkl.
+        Arbeitsbereichsausrichtung.  Typischerweise 180° für beide SCARA-Roboter
+        (STL-Nulllage zeigt in -X, Kinematik erwartet +X).
+    base_rotation_z : float oder None
+        Rein visuelle Drehung des Basisgehäuses.  Wenn None, wird
+        ``rotation_z`` verwendet.  Nützlich wenn Gehäuse und Arm
+        unterschiedlich ausgerichtet sein sollen (Roboter 3).
     """
 
     def __init__(self, data_folder_path=None, pl=None, position=(0, 0, 0),
                  rotation_z=0.0, base_rotation_z=None):
-        """
-        rotation_z      : kinematische Montagedrehung (Arbeitsbereich + Arm-Visualisierung).
-        base_rotation_z : rein visuelle Drehung des Basis-Gehäuses; wenn None wird rotation_z verwendet.
-        """
-
-        # --------------------------------------------------------
-        # 1. Position / Offset des ganzen Roboters
-        # --------------------------------------------------------
+        """Lädt STL-Modelle, erstellt Aktoren und setzt die Ausgangsstellung."""
         self.position = position
         self.rotation_z = rotation_z
-        # Separate visual rotation for the static base housing (defaults to rotation_z)
         self._base_rotation_z = base_rotation_z if base_rotation_z is not None else rotation_z
 
-        # --------------------------------------------------------
-        # 2. Pfade konfigurieren
-        # --------------------------------------------------------
+        # ── STL-Pfade ─────────────────────────────────────────────────────────
         if data_folder_path is None:
             cwd = os.getcwd()
             data_folder_path = os.path.join(cwd, "View", "Scara_Modell")
-            
-        base_file = os.path.join(data_folder_path, "Base.stl")
-        inner_arm_file = os.path.join(data_folder_path, "InnerArm.stl")
-        outer_arm_file = os.path.join(data_folder_path, "OuterArm.stl")
-        spindle_file = os.path.join(data_folder_path, "Spindle.stl")
 
-        # --------------------------------------------------------
-        # 3. Modelle einlesen
-        # --------------------------------------------------------
-        base_mesh = pv.read(base_file)
+        base_file       = os.path.join(data_folder_path, "Base.stl")
+        inner_arm_file  = os.path.join(data_folder_path, "InnerArm.stl")
+        outer_arm_file  = os.path.join(data_folder_path, "OuterArm.stl")
+        spindle_file    = os.path.join(data_folder_path, "Spindle.stl")
+
+        # ── Meshes einlesen und auf Roboterposition verschieben ───────────────
+        base_mesh      = pv.read(base_file)
         inner_arm_mesh = pv.read(inner_arm_file)
         outer_arm_mesh = pv.read(outer_arm_file)
-        spindle_mesh = pv.read(spindle_file)
+        spindle_mesh   = pv.read(spindle_file)
 
-        # --------------------------------------------------------
-        # 4. Ganzen Roboter verschieben
-        # Wichtig:
-        # Meshes UND Drehpunkte werden verschoben.
-        # --------------------------------------------------------
-        base_mesh.translate(self.position, inplace=True)
-        inner_arm_mesh.translate(self.position, inplace=True)
-        outer_arm_mesh.translate(self.position, inplace=True)
-        spindle_mesh.translate(self.position, inplace=True)
+        for mesh in (base_mesh, inner_arm_mesh, outer_arm_mesh, spindle_mesh):
+            mesh.translate(self.position, inplace=True)
 
-        # Spindel-Mesh speichern, damit der Sauger am unteren Ende gebaut werden kann
-        self.spindle_mesh = spindle_mesh
+        self.spindle_mesh = spindle_mesh  # Referenz für Saugnapf-Erzeugung
 
-        # --------------------------------------------------------
-        # 5. Plotter verwenden oder eigenen erstellen
-        # --------------------------------------------------------
+        # ── Plotter ───────────────────────────────────────────────────────────
         if pl is None:
             self.pl = pv.Plotter()
         else:
             self.pl = pl
 
-        # --------------------------------------------------------
-        # 6. Visuelle Drehung des Basis-Gehäuses (unabhängig von Kinematik)
-        # --------------------------------------------------------
+        # ── Visuelle Basisgehäuse-Drehung (unabhängig von Arm-Kinematik) ──────
         if abs(self._base_rotation_z) > 0.01:
             rx, ry, rz = self.position
             base_mesh.rotate_z(self._base_rotation_z, point=(rx, ry, rz), inplace=True)
 
-        # --------------------------------------------------------
-        # 7. Meshes in die Szene einfügen
-        # --------------------------------------------------------
-        self.base_actor = self.pl.add_mesh(base_mesh, color="lightblue")
+        # ── Aktoren einfügen ──────────────────────────────────────────────────
+        self.base_actor      = self.pl.add_mesh(base_mesh,      color="lightblue")
         self.inner_arm_actor = self.pl.add_mesh(inner_arm_mesh, color="orange")
         self.outer_arm_actor = self.pl.add_mesh(outer_arm_mesh, color="green")
-        self.spindle_actor = self.pl.add_mesh(spindle_mesh, color="gray")
+        self.spindle_actor   = self.pl.add_mesh(spindle_mesh,   color="gray")
 
-        # --------------------------------------------------------
-        # 8. Original-Drehpunkte aus CAD
-        # --------------------------------------------------------
-        original_origin_inner = (0.0, 0.0, 0.0)
-        original_origin_outer = (-325.0, 0.0, 0.0)
-        original_origin_spindle = (-550.0, 0.0, 0.0)
+        # ── Gelenk-Drehpunkte aus CAD-Koordinaten (verschoben um position) ────
+        # CAD-Ursprünge vor dem Verschieben:
+        #   J1 = (0, 0, 0), J2 = (-325, 0, 0), Spindel = (-550, 0, 0)
+        px, py, pz = self.position
+        self.origin_inner   = (    0.0 + px,  0.0 + py, 0.0 + pz)  # Schultergelenk
+        self.origin_outer   = (-325.0 + px,  0.0 + py, 0.0 + pz)  # Ellbogengelenk
+        self.origin_spindle = (-550.0 + px,  0.0 + py, 0.0 + pz)  # TCP-Drehpunkt
 
-        # --------------------------------------------------------
-        # 9. Drehpunkte ebenfalls verschieben
-        # --------------------------------------------------------
-        self.origin_inner = (
-            original_origin_inner[0] + self.position[0],
-            original_origin_inner[1] + self.position[1],
-            original_origin_inner[2] + self.position[2]
-        )
-
-        self.origin_outer = (
-            original_origin_outer[0] + self.position[0],
-            original_origin_outer[1] + self.position[1],
-            original_origin_outer[2] + self.position[2]
-        )
-
-        self.origin_spindle = (
-            original_origin_spindle[0] + self.position[0],
-            original_origin_spindle[1] + self.position[1],
-            original_origin_spindle[2] + self.position[2]
-        )
-
-        # PyVista Origins setzen
         self.inner_arm_actor.origin = self.origin_inner
         self.outer_arm_actor.origin = self.origin_outer
-        self.spindle_actor.origin = self.origin_spindle
+        self.spindle_actor.origin   = self.origin_spindle
 
-        # --------------------------------------------------------
-        # 10. Sauger hinzufügen
-        # --------------------------------------------------------
+        # ── Vakuumsauger erzeugen ─────────────────────────────────────────────
         self._add_suction_cup()
 
-        # Initiale Transformation setzen, aber noch NICHT rendern
+        # Ausgangsstellung (noch kein render, Fenster noch nicht offen)
         self.update_joints(0, 0, 0, render=False)
 
-        # --------------------------------------------------------
-        # 10. Kamera einstellen
-        # --------------------------------------------------------
+        # ── Kameraposition ────────────────────────────────────────────────────
         self.pl.camera_position = [
             (200.0, -1800.0, 1000.0),
-            (0.0, 400.0, 0.0),
-            (0.0, 0.0, 1.0)
+            (  0.0,   400.0,    0.0),
+            (  0.0,     0.0,    1.0),
         ]
 
-    # ============================================================
-    # VAKUUM-SAUGER
-    # ============================================================
+    # ------------------------------------------------------------------
+    # Vakuumsauger
+    # ------------------------------------------------------------------
+
     def _add_suction_cup(self):
         """
-        Erstellt einen Vakuumsauger am unteren Ende der Spindel.
+        Erzeugt den Vakuumsauger am unteren Ende der Spindel.
+
+        Besteht aus:
+        * Halterungszylinder (``suction_mount_actor``)
+        * Saugnapf-Kegel    (``suction_cup_actor``)
+        * Bauteil-Dummy     (``_part_actor`` — unsichtbar bis Vakuum aktiv)
+
+        Setzt ``tcp_z_ref``: die Z-Weltkoordinate der Saugnapf-Spitze
+        bei ``acsAxis3 = 0`` (wird von ``RobotController._world_z_to_mcs()``
+        genutzt).
         """
-        b = self.spindle_mesh.bounds
+        b   = self.spindle_mesh.bounds
+        cx  = (b[0] + b[1]) / 2.0
+        cy  = (b[2] + b[3]) / 2.0
+        tz  = b[4]   # unteres Ende der Spindel in der Ausgangsstellung
 
-        # Mitte der Spindel
-        cx = (b[0] + b[1]) / 2.0
-        cy = (b[2] + b[3]) / 2.0
-
-        # Unterstes Ende der Spindel
-        tip_z = b[4]
-
-        tx = cx
-        ty = cy
-        tz = tip_z
-
-        # Mount: center=(tx,ty,tz-10) h=20 → extends from tz-20 to tz
-        # Cup  : center=(tx,ty,tz-22.5) dir=(0,0,-1) h=5 → tip at tz-25
-        # tcp_z_ref must be the ACTUAL TIP world-Z when acsAxis3=0, not the spindle bottom.
+        # Saugnapf-Spitze liegt 25 mm unter der Spindelunterkante
         self.tcp_z_ref = tz - 25
 
-        # Halterung (kleiner Zylinder, der aus der Spindel kommt)
+        # Halterung: Zylinder von tz-20 bis tz
         mount = pv.Cylinder(
-            center=(tx, ty, tz - 10),
+            center=(cx, cy, tz - 10),
             direction=(0, 0, 1),
             radius=6,
-            height=20
+            height=20,
         )
 
-        # Saugnapf (Kegel / Cone)
+        # Saugnapf: Kegel mit Spitze bei tz-25
         cup = pv.Cone(
-            center=(tx, ty, tz - 22.5),
+            center=(cx, cy, tz - 22.5),
             direction=(0, 0, -1),
             height=5,
-            radius=15
+            radius=15,
         )
 
-        # Actors hinzufügen
-        self.suction_mount_actor = self.pl.add_mesh(
-            mount,
-            color="dimgray"
-        )
+        self.suction_mount_actor = self.pl.add_mesh(mount, color="dimgray")
+        self.suction_cup_actor   = self.pl.add_mesh(cup,   color="red")
 
-        self.suction_cup_actor = self.pl.add_mesh(
-            cup,
-            color="red"
-        )
-
-        # Workpiece actor — hidden until suction is active
-        # Das Dummy-Rohteil wird direkt unter den Sauger platziert
+        # Bauteil-Dummy: unsichtbarer Block unter dem Sauger
         part_mesh = pv.Box(bounds=(
-            tx - 50, tx + 50,
-            ty - 25, ty + 25,
+            cx - 50, cx + 50,
+            cy - 25, cy + 25,
             tz - 50, tz - 25,
         ))
         self._part_actor = self.pl.add_mesh(part_mesh, color="saddlebrown")
         self._part_actor.SetVisibility(False)
 
     def attach_part(self, visible: bool):
-        """Zeigt oder versteckt das simulierte Bauteil am Sauger."""
+        """
+        Blendet das simulierte Bauteil am Sauger ein oder aus.
+
+        Parameter
+        ---------
+        visible : bool
+            True = Teil wird am Sauger angezeigt (Vakuum aktiv).
+            False = Teil versteckt (Sauger leer).
+        """
         self._part_actor.SetVisibility(visible)
 
-    def set_gripper(self, closed=False):
+    def set_gripper(self, closed: bool = False):
         """
-        Schaltet das Vakuum ein oder aus (Name 'set_gripper' für Kompatibilität mit HMI).
+        Schaltet die Vakuumanzeige ein oder aus.
 
-        closed=False -> Vakuum aus (Rot)
-        closed=True  -> Vakuum an (Grün)
+        ``closed=True``  → Saugnapf grün (Vakuum aktiv).
+        ``closed=False`` → Saugnapf rot  (Vakuum inaktiv).
+
+        Parameter
+        ---------
+        closed : bool
+            True = Vakuum ein, False = Vakuum aus.
         """
         if closed:
             self.suction_cup_actor.GetProperty().SetColor(pv.Color("limegreen").float_rgb)
         else:
             self.suction_cup_actor.GetProperty().SetColor(pv.Color("red").float_rgb)
 
-    # ============================================================
-    # ANZEIGE
-    # ============================================================
+    # ------------------------------------------------------------------
+    # Anzeige / Hauptmethoden
+    # ------------------------------------------------------------------
+
     def show(self):
-        """
-        Öffnet das 3D-Fenster.
-        """
+        """Öffnet das 3D-Fenster (nur für Standalone-Tests)."""
         self.pl.show(interactive_update=True, auto_close=False)
 
-    def update_joints(self, inner_angle=0, outer_angle=0, spindle_angle=0, z_height=0.0, render=True):
+    def update_joints(self, inner_angle: float = 0, outer_angle: float = 0,
+                      spindle_angle: float = 0, z_height: float = 0.0,
+                      render: bool = True):
         """
-        Aktualisiert die Gelenkwinkel.
+        Aktualisiert alle Gelenk-Transformationen der SCARA-Armsegmente.
+
+        Die Winkel entsprechen den ACS-Istwerten aus ``RobotController.update_view()``.
+        Der ``inner_angle`` wird um ``rotation_z`` korrigiert, damit der Arm
+        in der 3D-Szene korrekt ausgerichtet ist.
+
+        Transformationskette (PostMultiply = links-nach-rechts):
+        1. J1-Frame: Schultergelenk + Montagedrehung
+        2. J2-Frame: Ellbogengelenk, dann J1 folgen
+        3. TCP-Frame: J4-Rotation, dann J2, dann J1, dann Z-Hub
+
+        Alle Sauger-Aktoren (Halterung, Napf, Bauteil) folgen dem TCP-Frame.
+
+        Parameter
+        ---------
+        inner_angle : float
+            acsAxis1 (Schulter) + 180° Offset [Grad].
+        outer_angle : float
+            acsAxis2 (Ellbogen) [Grad].
+        spindle_angle : float
+            acsAxis4 (Werkzeugdrehung) [Grad].
+        z_height : float
+            acsAxis3 (Hub), negativ = abgesenkt [mm].
+        render : bool
+            Bei True wird ``pl.update()`` aufgerufen.
         """
         ix, iy, iz = self.origin_inner
         ox, oy, oz = self.origin_outer
         sx, sy, sz = self.origin_spindle
 
-        # Montagedrehung: dreht den gesamten Arm um die Roboterbasis
-        base_angle = inner_angle + self.rotation_z
+        base_angle = inner_angle + self.rotation_z  # Arm-Richtung inklusive Montage
 
-        # Joint1Frame: innerer Arm dreht um Gelenk 1 + Montagedrehung
+        # J1-Frame: Schultergelenk-Drehung
         t_j1 = vtk.vtkTransform()
         t_j1.PostMultiply()
         t_j1.Translate(-ix, -iy, -iz)
@@ -255,7 +282,7 @@ class Scara:
         t_j1.Translate(ix, iy, iz)
         self.inner_arm_actor.SetUserTransform(t_j1)
 
-        # Joint2Frame: äußerer Arm dreht lokal um Gelenk 2, folgt Gelenk 1
+        # J2-Frame: Ellbogengelenk, dann J1 folgen
         t_j2 = vtk.vtkTransform()
         t_j2.PostMultiply()
         t_j2.Translate(-ox, -oy, -oz)
@@ -266,7 +293,7 @@ class Scara:
         t_j2.Translate(ix, iy, iz)
         self.outer_arm_actor.SetUserTransform(t_j2)
 
-        # ToolFrame (TCP): Spindel dreht lokal, folgt J2 und J1, Z-Bewegung zuletzt
+        # TCP-Frame: J4 + J2 + J1 + Z-Hub
         t_tcp = vtk.vtkTransform()
         t_tcp.PostMultiply()
         t_tcp.Translate(-sx, -sy, -sz)
@@ -281,16 +308,11 @@ class Scara:
         t_tcp.Translate(0.0, 0.0, z_height)
         self.spindle_actor.SetUserTransform(t_tcp)
 
-        # --------------------------------------------------------
-        # Sauger folgt TCP-Frame
-        # --------------------------------------------------------
+        # Sauger folgt dem TCP-Frame
         self.suction_mount_actor.SetUserTransform(t_tcp)
         self.suction_cup_actor.SetUserTransform(t_tcp)
         self._part_actor.SetUserTransform(t_tcp)
 
-        # --------------------------------------------------------
-        # Fenster aktualisieren
-        # --------------------------------------------------------
         if render:
             try:
                 self.pl.update()
@@ -298,66 +320,32 @@ class Scara:
                 pass
 
     def close(self):
-        """
-        Schliesst das PyVista-Fenster.
-        """
+        """Schliesst das PyVista-Fenster."""
         self.pl.close()
 
 
 # ================================================================
-# TEST
+# Standalone-Test (python View/Scara.py)
 # ================================================================
 if __name__ == "__main__":
     import time
 
     plotter = pv.Plotter()
-
-    # Roboter 1
-    robot1 = Scara(
-        pl=plotter,
-        position=(0, 0, 0)
-    )
-
-    # Roboter 2 daneben
-    robot2 = Scara(
-        pl=plotter,
-        position=(0, 800, 0)
-    )
-
+    robot1  = Scara(pl=plotter, position=(0,   0, 0))
+    robot2  = Scara(pl=plotter, position=(0, 800, 0))
     plotter.show_axes()
-
-    plotter.show(
-        interactive_update=True,
-        auto_close=False
-    )
+    plotter.show(interactive_update=True, auto_close=False)
 
     print("Starte Bewegungstest...")
-
     for i in range(500):
-        robot1.update_joints(
-            inner_angle=i,
-            outer_angle=-i * 0.5,
-            spindle_angle=i * 2
-        )
-
-        robot2.update_joints(
-            inner_angle=i + 80,
-            outer_angle=-i * 0.5 + 60,
-            spindle_angle=i * 2
-        )
-
-        # Test: Vakuum abwechselnd ein-/ausschalten
+        robot1.update_joints(inner_angle=i,      outer_angle=-i * 0.5, spindle_angle=i * 2)
+        robot2.update_joints(inner_angle=i + 80, outer_angle=-i * 0.5 + 60, spindle_angle=i * 2)
         if i % 100 < 50:
-            robot1.set_gripper(closed=False)
-            robot2.set_gripper(closed=True)
-            robot1.attach_part(False)
-            robot2.attach_part(True)
+            robot1.set_gripper(closed=False); robot2.set_gripper(closed=True)
+            robot1.attach_part(False);        robot2.attach_part(True)
         else:
-            robot1.set_gripper(closed=True)
-            robot2.set_gripper(closed=False)
-            robot1.attach_part(True)
-            robot2.attach_part(False)
-
+            robot1.set_gripper(closed=True);  robot2.set_gripper(closed=False)
+            robot1.attach_part(True);         robot2.attach_part(False)
         time.sleep(0.05)
 
     print("Test beendet.")

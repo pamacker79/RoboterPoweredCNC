@@ -1,88 +1,196 @@
 # RoboterPoweredCNC
 
-3D simulation and HMI control for a multi-robot workcell: two SCARA arms and one H-Bot gantry, with a Tkinter operator panel and G-Code CNC interpreter.
+3D-Simulation und HMI-Steuerung einer Mehrroboter-Fertigungszelle:
+zwei SCARA-Arme und eine H-Bot-Gravurgantry, mit Tkinter-Bedienpanel
+und vollautomatischem Pick-and-Place-Ablauf.
 
-## Requirements
+---
 
-- **Windows** (TCL/TK library paths are hardcoded for Windows in `main.py`)
-- Python 3.13
-- PyVista: `pip install "pyvista[all]>=0.43.0"`
+## Voraussetzungen
 
-## Run
+| Anforderung | Version / Hinweis |
+|---|---|
+| **Betriebssystem** | Windows 10 / 11 (Tcl/Tk-Pfade werden automatisch gesetzt) |
+| **Python** | 3.11 oder neuer |
+| **PyVista** | `pip install "pyvista[all]>=0.43.0"` |
+
+---
+
+## Starten
 
 ```
 python main.py
 ```
 
-Two windows open simultaneously:
-- **HMI window** — three Tkinter panels (one per robot)
-- **3D window** — shared PyVista scene with all robots and the magazine
+Es öffnen sich gleichzeitig zwei Fenster:
 
-## Architecture
+- **HMI-Fenster** — drei nebeneinander stehende Tkinter-Panels (je eines pro Roboter)
+- **3D-Fenster** — gemeinsame PyVista-Szene mit allen Robotern und dem Magazin
+
+---
+
+## Systemarchitektur (MVC)
 
 ```
-main.py (Machine)
+main.py  (Machine — 100-Hz-Steuerkreis)
 │
-├── Model/          — kinematics and logic only, no UI
-│   ├── Axis.py           property-based axis with software limits
-│   ├── Scara.py          4-DOF SCARA forward/inverse kinematics
-│   ├── hBot.py           CoreXY H-Bot motor ↔ Cartesian conversion
-│   ├── CncInterpreter.py G-Code parser and path interpolator
-│   └── RobotConfig.py    axis limits and home positions (single source of truth)
+├── Model/                  Kinematik & Datenmodelle (keine UI)
+│   ├── Axis.py             Einzelachse: Softwarebegrenzung + Bewegungsrampe
+│   ├── Scara.py            4-DOF SCARA: Vorwärts-/Rückwärtskinematik, Jog
+│   ├── hBot.py             CoreXY H-Bot: MCS-Steuerung + cyclic()
+│   ├── RobotConfig.py      Zentrale Achsgrenzen und Heimatposition
+│   └── WorkpieceManager.py Bauteil-Stapelregister mit räumlichen Abfragen
 │
-├── View/           — PyVista 3D visualization, loads STL files
-│   ├── Scara.py          SCARA arm mesh rendering and joint transforms
-│   ├── HBot.py           H-Bot gantry mesh rendering
-│   ├── MagazinViewPV.py  raw-part magazine in the shared 3D scene
-│   └── magazin.py        standalone matplotlib magazine inspector
+├── View/                   PyVista 3D-Visualisierung (lädt STL-Dateien)
+│   ├── Scara.py            SCARA-Arm: Mesh-Rendering, Gelenktransformationen, Vakuumsauger
+│   ├── HBot.py             H-Bot-Gantry: Basis, Y-Brücke, X-Schlitten
+│   └── MagazinViewPV.py    Rohteil-Stapelmagazin in der gemeinsamen 3D-Szene
 │
-└── ViewModel/      — Tkinter HMI panels, bridges input→model and model→display
-    ├── hmi.py            operator panel (jog, mode, override, status)
-    ├── hmiControl.py     DTO: operator commands → RobotController
-    ├── hmiState.py       DTO: axis positions → HMI display labels
-    └── RobotController.py per-robot orchestration (HMI → kinematics → view)
+└── ViewModel/              Tkinter HMI-Panels (Eingabe → Modell → Anzeige)
+    ├── hmi.py              SCARA-Bedienpanel (Jog, Modus, Koordinaten, Sequenz, Status)
+    ├── hmiHBot.py          H-Bot-Bedienpanel (Jog X/Y, Modus, Sequenz, Status)
+    ├── hmiControl.py       DTO: Bedienereingaben → RobotController
+    ├── hmiState.py         DTO: Achsistwerte → HMI-Anzeige
+    └── RobotController.py  Pro-Roboter-Orchestrierung (HMI ↔ Kinematik ↔ View)
 ```
 
-## HMI Controls
+---
 
-Each robot panel has:
+## Ablaufbeschreibung (Automatikbetrieb)
 
-| Control | Description |
+```
+Magazin
+  │  Rohteil (stapelbar, bis 6 Stück)
+  │
+  ▼
+Roboter 1 (SCARA links)
+  │  Greift oberstes Rohteil aus Magazin
+  │  Legt es auf H-Bot-Arbeitsfläche ab
+  │  Startet nur wenn Roboter 3 in Heimatposition
+  │
+  ▼
+H-Bot (Gravurgantry, Mitte)
+  │  Erkennt Bauteil via WorkpieceManager
+  │  Fährt Gravurmuster (7 Wegpunkte, Rechteck 50 mm)
+  │  Fährt in Parkposition
+  │  Startet nur wenn Roboter 1 fertig (idle)
+  │
+  ▼
+Roboter 3 (SCARA rechts)
+  │  Greift graviertes Bauteil von H-Bot-Arbeitsfläche
+  │  Legt es im Endlager rechts ab (stapelbar)
+  │  Startet nur wenn H-Bot in Parkposition (Gravur fertig)
+  │
+  ▼
+Endlager (Ablagestapel rechts)
+```
+
+---
+
+## HMI-Bedienelemente
+
+### SCARA-Panels (Roboter 1 und Roboter 3)
+
+| Element | Beschreibung |
 |---|---|
-| Koordinatensystem | Joint / Welt / Werkzeug jog space |
-| Betriebsart | Hand (manual jog) or Automatisch (CNC program) |
-| X/Y/Z/R +/− | Jog buttons (hold to move) |
-| Override slider | CNC execution speed 0–100 % |
-| Status bar | Green=Bereit, Orange=Achse an Grenzwert, Red=STÖRUNG |
-| Start | In Hand mode: close gripper. In Auto mode: run CNC program |
-| Reset | Clear fault, drive all axes to home position (0°/0mm) |
-| Stop | Open gripper, stop motion |
+| **Betriebsart** | `Hand` = manuelles Jog, `Automatisch` = Pick-and-Place-Sequenz |
+| **Koordinaten** | `Joint` / `Welt` / `Werkzeug` — aktiver Jog-Raum |
+| **X/Y/Z/R +/−** | Jog-Tasten (halten = kontinuierliche Bewegung) |
+| **Override** | Geschwindigkeitsskalierung 0–100 % (wirkt im Automatikbetrieb) |
+| **Sequenz** | 6 farbige Kästchen — zeigt den aktuellen Sequenzschritt |
+| **Status** | Statusmeldung mit Farbcode (Grün / Gelb / Orange / Rot) |
+| **Saugen** | Vakuum ein/aus (nur im Handbetrieb aktiv) |
+| **Reset** | Störung quittieren + Arm in Heimatposition fahren |
 
-## Coordinate Systems
+### H-Bot-Panel (Mitte)
 
-SCARA robots switch between:
-- **ACS** (`acsAxis1`–`acsAxis4`) — joint/articulated angles and hub height
-- **MCS** (`mcsAxisX/Y/Z/R`) — Cartesian machine coordinates
+| Element | Beschreibung |
+|---|---|
+| **Betriebsart** | `Hand` = Jog X/Y, `Automatisch` = Gravursequenz |
+| **X/Y +/−** | Jog-Tasten für Laserkopf |
+| **Override** | Gravur-Verfahrgeschwindigkeit 0–100 % |
+| **Sequenz** | 5 Kästchen: Warten → Anfahrt → Gravur (n/m) → Park → Fertig |
+| **Status** | Statusmeldung mit Farbcode |
+| **Reset** | Störung quittieren |
 
-The jog coordinate system selector determines which space the +/− buttons operate in.
+---
 
-## Axis Limits
+## Koordinatensysteme
 
-All software limits are defined in `Model/RobotConfig.py`. Edit that file to change any limit system-wide — no other changes needed.
+| System | Achsen | Beschreibung |
+|---|---|---|
+| **ACS** | `acsAxis1`–`acsAxis4` | Gelenkkoordinaten (Winkel [°] und Hub [mm]) |
+| **MCS** | `mcsAxisX/Y/Z/R` | Kartesische TCP-Koordinaten [mm / °] |
 
-## Running Individual Model Files
+Die SCARA-Kinematik berechnet beim Jog in "Welt" oder "Werkzeug" automatisch
+via Rückwärtskinematik (IK) die Gelenkwinkel. Im "Joint"-Modus werden die
+Gelenkwinkel direkt inkrementiert.
 
-Model files can be run directly for quick inspection:
+---
+
+## Statusfarben
+
+| Farbe | Bedeutung |
+|---|---|
+| Grün | Bereit / Handbetrieb OK |
+| Hellgelb | Automatikbetrieb läuft |
+| Cyan | Automatik wartet auf Vorbedingung |
+| Orange | Achse an Grenzwert / Modus noch nicht gewählt |
+| Lachs | Warte auf anderen Roboter |
+| Rot | STÖRUNG — Reset drücken |
+
+---
+
+## Achsbegrenzungen anpassen
+
+Alle Softwarebegrenzungen und Geschwindigkeiten sind ausschliesslich in
+`Model/RobotConfig.py` definiert.  Eine Änderung dort wirkt sofort
+systemweit — kein weiterer Code muss angepasst werden.
+
+```python
+# Beispiel: H-Bot Verfahrgeschwindigkeit erhöhen (500 → 1000 mm/s)
+HBOT_LIMITS = {
+    "mcsAxisX": (-700.0, 700.0, 10.0),   # 10 mm/Tick × 100 Hz = 1000 mm/s
+    "mcsAxisY": (-300.0, 300.0, 10.0),
+    ...
+}
+```
+
+---
+
+## Einzelne Dateien direkt ausführen
+
+```bash
+python Model/Axis.py        # Selbsttest der Bewegungsrampe
+python View/Scara.py        # Bewegungstest der SCARA-3D-Visualisierung
+python ViewModel/hmi.py     # HMI-Layout-Vorschau (alle drei Panels)
+```
+
+---
+
+## Projektstruktur (vollständig)
 
 ```
-python Model/Scara.py      # kinematics test
-python View/magazin.py     # matplotlib magazine inspector
-python ViewModel/hmi.py    # HMI layout preview
+RoboterPoweredCNC/
+├── main.py
+├── README.md
+├── Model/
+│   ├── Axis.py
+│   ├── hBot.py
+│   ├── RobotConfig.py
+│   ├── Scara.py
+│   └── WorkpieceManager.py
+├── View/
+│   ├── HBot.py
+│   ├── MagazinViewPV.py
+│   ├── Scara.py
+│   ├── H_Bot_Modell/       STL-Dateien der H-Bot-Gantry
+│   ├── Scara_Modell/       STL-Dateien des SCARA-Arms
+│   └── Magazin_Modell/     STL-Dateien des Magazins
+└── ViewModel/
+    ├── hmi.py
+    ├── hmiControl.py
+    ├── hmiHBot.py
+    ├── hmiState.py
+    └── RobotController.py
 ```
-
-## Known Limitations
-
-- Motion is instant (no velocity ramps or acceleration profiles)
-- G2/G3 arc interpolation is not fully implemented
-- Pick-and-place sequences are not automated — manual jog only
-- Screenshots require manual capture from the PyVista window
